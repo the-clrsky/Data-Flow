@@ -1,248 +1,235 @@
 # Data Flow
 
-Selective **Oracle → PostgreSQL** table & data migration with a small web GUI.
+[![Latest release](https://img.shields.io/github/v/release/the-clrsky/data-flow)](https://github.com/the-clrsky/data-flow/releases/latest)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 
-Pick a subset of Oracle tables, map/rename columns, optionally combine
-several of them into one table (joined on keys, or stacked), create them in
-Postgres,
-compare row counts, and run a live, resumable, chunked sync with retry/backoff,
-row-level error capture, and a full history log — all from the browser. Pure
-Python, so it runs identically on Windows and on the Ubuntu server next to
-Postgres. **No ora2pg / Perl / Oracle Instant Client required**
-(`python-oracledb` runs in thin mode; `psycopg` v3 does the bulk load via
-`COPY`).
+Selective **Oracle → PostgreSQL** table and data migration, driven from a small
+web GUI.
+
+Pick the Oracle tables you want, map and rename their columns, translate values
+through dictionaries, combine several tables into one (or split one into
+several), create the tables in Postgres and run a live, resumable, chunked sync.
+It's pure Python, so it runs the same on Windows and Linux. **No ora2pg, Perl
+or Oracle Instant Client needed:** `python-oracledb` runs in thin mode and
+`psycopg` 3 bulk-loads with `COPY`.
+
+## Features
+
+- **Sets**: save several Oracle/Postgres pairs, each with its own tables,
+  mappings, dictionaries and history, and switch between them from the top bar.
+- **Column mapping**: rename, skip, retype, fan one column out to several, fill
+  nulls, fill Postgres-only columns.
+- **Dictionaries and Postgres lookups**: swap old values for new ones from an
+  Excel/CSV table, or from a table already in Postgres.
+- **Table groups**: join several Oracle tables into one wide table, stack
+  look-alike tables into one, or split one table into several.
+- **Safe syncs**: pre-flight checks, dry run, schema drift detection, 10,000-row
+  chunks with checkpoints, row-level error capture, retry with backoff.
+- **Live progress** (rows/sec, ETA) and a full **sync history**.
+- **Export / import** of sets as one file, with or without passwords.
 
 ## Download (Windows)
+
 Get `data-flow-<version>-windows.zip` from
-[Releases](https://github.com/the-clrsky/data-flow/releases): it brings its own
-Python, so nothing else needs installing. Unzip it, double-click
-`Data Flow.bat` and open `http://localhost:8000`. `READ-ME-FIRST.txt` inside
+[Releases](https://github.com/the-clrsky/data-flow/releases/latest). It brings
+its own Python, so nothing else needs installing. Unzip it, double-click
+`Data Flow.bat`, and open <http://localhost:8000>. `READ-ME-FIRST.txt` inside
 explains the rest.
 
-## Install & run from source
-From the project root:
+## Run from source
 
-**Linux / Ubuntu server**
+Requires **Python 3.11+** and network access to your Oracle and Postgres
+servers.
+
+**Linux / macOS**
 ```bash
 chmod +x run.sh
 ./run.sh
 ```
+
 **Windows**
 ```bat
 run.bat
 ```
-Both create a venv, install the package, and start the app via the `data-flow`
-command. Then open `http://localhost:8000` (or `http://<server-ip>:8000` on the
-LAN).
 
-To install manually:
+Both create a virtual environment, install the package and start the app. Then
+open <http://localhost:8000>.
+
+Or install it yourself:
 ```bash
 pip install -e .
-data-flow            # launches the server
+data-flow
 ```
-Environment overrides: `DATAFLOW_HOST`, `DATAFLOW_PORT`, `DATAFLOW_DB`
-(path to the SQLite state file; defaults to `./data-flow.db`).
 
-### Share a portable Windows package
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `DATAFLOW_HOST` | `0.0.0.0` | Address to listen on. Use `127.0.0.1` to keep it to this computer. |
+| `DATAFLOW_PORT` | `8000` | Port. |
+| `DATAFLOW_DB` | `./data-flow.db` | SQLite file holding your settings and history. |
+
+## How to use it
+
+### Sets
+
+A **set** is one Oracle/Postgres pair with everything built on it: its table
+selection, groups, dictionaries, lookups, mappings and sync history. The menu at
+the top right shows the active set in its colour. Pick another set there and
+every tab switches to it.
+
+- **+ New set…** (in the menu) starts an empty set.
+- **Save as new set…** (on Connections) starts one with the current set's
+  connections.
+- **Export this set / Export sets… / Export all** write a `.db` file. Passwords
+  are left out unless you tick **Include passwords**.
+- **Import…** reads such a file. Its sets are added next to yours (a name you
+  already have is overwritten, or comes in as "Name (2)"), or the file replaces
+  everything. Files exported before sets existed come in as one set,
+  "Default".
+
+### The tabs
+
+1. **Connections**: name the set, pick its colour, and enter and test its
+   Oracle and Postgres connections.
+2. **Tables**: list the Oracle tables, filter them, and pick the ones to
+   migrate. **Show row counts (approx.)** reads Oracle's optimizer statistics
+   in one query instead of running `COUNT(*)` per table, so it stays fast on
+   schemas with thousands of tables.
+3. **Groups**: several Oracle tables into one Postgres table, or the reverse.
+   - **Join on keys**: one wide row per joined result. The first table drives
+     the join; each later one links to an earlier table on one or more column
+     pairs, as an `inner` or `left` join. **Suggest from Oracle FKs** fills the
+     links in from foreign keys. Left-joined columns become nullable, and
+     clashing column names get the source table as a suffix (a rename on
+     Mappings overrides it).
+   - **Union**: look-alike tables stacked into one. The target gets every
+     mapped column plus `_source_table`, so one source can be reloaded without
+     touching the others. A column only some sources have becomes nullable;
+     two sources sending one column as different types is refused.
+   - **Split**: one Oracle table into several Postgres tables, each with its
+     own columns (none ticked = all) and an optional `WHERE` filter. The
+     primary key is copied into each.
+
+   A join or union target gets **no primary key**, since a join can repeat a
+   source's key and union sources can collide. Add one yourself if the data
+   really is unique. A table belongs to at most one group and is then never
+   created or synced on its own. Changing any member's mapping, the links or
+   the mode flags the whole group for recreation.
+
+4. **Dictionaries**: value translations for the column mappings.
+   **Dictionaries** are old → new value tables, uploaded from Excel or CSV
+   (header `oracle,postgres`) or typed in. **Postgres lookups** take the value
+   from a table already in Postgres, e.g. the `id` of the row whose `code` is
+   the Oracle value, matching on one or more columns. Each card shows which
+   mapping columns use it. **View** opens a dictionary's entries, and
+   **Import from another set…** copies dictionaries from another set.
+5. **Mappings**: per table, rename the target table and its columns, skip
+   columns, override Postgres types, send a column to several targets, run it
+   through a dictionary or lookup, or give it a value when it's null. A
+   Postgres-only column of an existing target can be filled with a fixed value
+   or a dictionary/lookup of an Oracle column (**Add to Sync**). **Fast load**
+   drops constraints, indexes and FKs before the sync and recreates them after.
+   **Schema drift** (a mapping changed after its table was created) is flagged
+   before the next sync, so recreating is a deliberate choice.
+6. **Migrate & Sync**
+   - Create (or recreate) the selected tables in Postgres and compare row
+     counts side by side.
+   - **Pre-flight checks** before every sync: both connections reachable, read
+     access on each Oracle table, CREATE/INSERT/ownership on the target. A
+     failing check stops the sync before anything is touched.
+   - **Dry run**: the DDL a create/recreate would run, row counts on both
+     sides, and the constraints a fast load would drop and recreate. Nothing
+     is executed.
+   - **Chunked, resumable sync**: 10,000-row chunks via `COPY`, with a
+     checkpoint after each. An interrupted sync resumes where it stopped, or
+     **start fresh** reloads the table.
+   - **Row-level error capture**: if a chunk's `COPY` fails on bad data, that
+     chunk is inserted row by row, so one bad row doesn't lose the rest. The
+     skipped rows are logged with their error.
+   - **Retry with backoff** on transient connection errors (3 retries:
+     1 s, 2 s, 4 s).
+   - **Live progress** over server-sent events: rows loaded, rows/sec, ETA.
+7. **History**: every sync run of the set (table, times, duration, rows
+   loaded/skipped, status), with each run's row errors to view or download.
+
+## Security
+
+- **There is no login.** Anyone who can reach the port can use the app and its
+  saved connections. Run it on `127.0.0.1` or a trusted network only; never
+  expose it to the internet.
+- **Passwords are stored in plain text** in `data-flow.db`. Keep that file
+  private, and keep it out of version control (`.gitignore` already does).
+- Share exports **without passwords** unless the other person should be able to
+  connect too.
+
+## Limitations
+
+- Row-count estimates on Tables come from optimizer statistics, so they can be
+  stale after heavy recent changes. Compare and sync always use exact counts.
+- `types_map.py` covers the common Oracle types; extend it for exotic ones.
+- A **join group needs a primary key**, or a unique constraint whose columns
+  are all `NOT NULL`, on every source. Without a total order, rows sharing a
+  key could straddle a page boundary and be skipped, so such a source is
+  refused.
+- A join across a one-to-many relationship **multiplies rows**, as SQL joins
+  do. The Oracle count on Migrate & Sync is the count of the joined result, so
+  you can see what you'll get.
+- A **union group** is append-only and doesn't de-duplicate. Keep the
+  `_source_table` column: re-syncing one source deletes its rows by that
+  column rather than truncating, which is slower on large sources.
+- Groups are **load-only**: nothing is written back to Oracle.
+- Chunks are read by primary key, so cost stays flat on large tables. Tables
+  **without a primary key** fall back to `OFFSET` paging, which gets slow on
+  big tables.
+- If the browser closes mid-sync, fast-load constraints are still restored. If
+  the server process is killed between the drop and the restore, those tables
+  lose their keys and indexes; recreate the table or re-run the sync.
+- Tables sync one after another, not in parallel. Disk space isn't estimated
+  before a sync.
+
+## Development
+
+Tests are plain scripts with no databases needed:
+```bash
+python tests/test_sets.py      # or any tests/test_*.py
+```
+
+Build the portable Windows zip (into `dist\`):
 ```bat
 .venv\Scripts\python.exe build_package.py
 ```
-Builds `dist\data-flow-<version>-windows.zip` (~32 MB): the app plus its own
-Python, so the people you send it to need neither Python nor internet. They
-unzip it and double-click `Data Flow.bat`; `READ-ME-FIRST.txt` inside explains
-the rest. `docs/` is only packed with `--with-docs` (its guides name internal
-systems). The zip never contains a `data-flow.db` (it holds passwords). To bring
-saved settings along, use **Export all** on the Connections tab of the
-old copy and **Import saved settings…** on the new one's Connections tab, or
-copy the old `data-flow.db` into the new folder before starting it.
+It refuses to package any `.db` file, so saved settings and passwords never
+end up in it.
 
-## What it does
-
-**Sets.** A set is one Oracle/Postgres pair with everything built on it: its
-table selection, groups, dictionaries, lookups, mappings and sync history. The
-menu at the top right shows the active set (in its colour) and switches sets;
-every tab then shows that set. **+ New set…** starts an empty one; **Save as new
-set…** on Connections starts one with the current connections. Connections
-also exports one set, several, or all of them to a `.db` file, with or without
-passwords, and imports such a file: its sets are added next to yours (a set
-with a name you already have is overwritten, or comes in as "Name (2)"), or it
-replaces everything. Files exported before sets come in as one set,
-"Default". The Dictionaries tab can copy dictionaries from another set.
-
-1. **Connections** — name the active set (and pick its colour), enter + test
-   its Oracle and Postgres connections. **Export this set**, **Export sets…**,
-   **Export all** and **Import…** sit on the right of the set card (and in the
-   set menu).
-2. **Tables** — list Oracle tables, filter, pick which to migrate, save the
-   selection. A "Show row counts (approx.)" button pulls a fast, single-query
-   row-count estimate per table from Oracle's optimizer statistics — safe to
-   use even on schemas with thousands of tables, since it never does a live
-   `COUNT(*)` per table.
-3. **Groups** — combine **several Oracle tables into one Postgres table**.
-   Pick two or more of your selected tables, name the Postgres target, and
-   choose how they combine:
-   - **Join on keys** — the tables are joined and the target holds their
-     combined columns, one wide row per joined result row. The first table
-     in the order drives the join; each later one says which earlier table
-     it links to, on which column pairs (composite keys supported), as an
-     `inner` join (only matched rows) or a `left` join (keep unmatched rows,
-     NULL-filled). **Suggest from Oracle FKs** fills the link conditions
-     from the schema's foreign keys so you don't type column names.
-     Columns from a left-joined table are declared nullable automatically,
-     and name collisions between sources (two tables both having `NAME`)
-     are suffixed with the source table — a rename on the Mappings tab
-     overrides that.
-   - **Split** — the other way round: **one Oracle table into several**
-     Postgres tables. Each gets the columns ticked for it (none ticked = all)
-     and an optional Oracle `WHERE` row filter; the primary key is copied
-     into every one of them.
-   - **Union** — the tables are shaped alike and their rows are stacked.
-     The target gets the union of their mapped columns plus a
-     `_source_table` column recording each row's origin, which is what lets
-     one source be reloaded without disturbing the others. Columns only
-     some sources supply become nullable; if two sources send the same
-     column as different Postgres types the group is refused, naming the
-     conflict rather than silently picking one.
-
-   A join or union group's target gets **no primary key** (a join can repeat a source's
-   key, and a union's sources can collide with each other) — add one by hand
-   if the combined data really is unique. A table belongs to at most one
-   group, and a grouped table is never created or synced on its own. The
-   group is created, drift-checked and recreated as a unit: changing any
-   member's mapping, the join conditions or the mode flags the whole group.
-
-4. **Dictionaries** — value translations used by the column mappings.
-   **Dictionaries** are old → new value tables uploaded from Excel or CSV
-   (header `oracle,postgres`) or typed in. **Postgres lookups** take the value
-   from a table already in Postgres instead, e.g. the `id` of the row whose
-   `code` is the Oracle value, matching on one or more columns. Every
-   dictionary and lookup is shown as a card with the mapping columns that use
-   it (highlighted). Search by name, Oracle or Postgres column, or table.
-   **View** opens a dictionary's entries, where single entries can be added.
-   **Import from another set…** copies picked dictionaries from another set
-   (a dictionary of the same name here is replaced, after asking).
-
-5. **Mappings** — per-table column mapping: rename columns, rename the target
-   table, skip columns, override the Postgres type, and flag a table for
-   "fast load" (drop constraints/indexes/FKs before sync, recreate after).
-   A column can also feed more than one Postgres column, go through a
-   dictionary or lookup, or get a value when it's null; a Postgres-only column
-   of an existing target can be filled with a fixed value or a dictionary /
-   lookup of an Oracle column (**Add to Sync**). The dictionaries the open
-   table uses are listed beside the grid; **Hide** folds that column away.
-   Detects **schema drift** — if the mapping changes after a table was
-   created, it's flagged before the next sync so you can recreate deliberately
-   rather than get a silent surprise.
-
-6. **Migrate & Sync**
-   - Create the selected tables in Postgres (or recreate them to apply a
-     changed mapping) and compare row counts side by side.
-   - **Pre-flight checks** before every sync: both connections reachable,
-     Oracle read access on each source table, Postgres CREATE/INSERT/ownership
-     on the target — a failing check blocks the sync before it touches
-     anything, with the specific check and reason reported.
-   - **Dry run** — preview the DDL a create/recreate would issue, current row
-     counts on both sides, and (for fast-load tables) exactly which
-     constraints/indexes would be dropped and recreated — without executing
-     anything.
-   - **Chunked, resumable sync** — data loads in fixed 10,000-row chunks via
-     `COPY`, with a checkpoint recorded in SQLite after each chunk commits. An
-     interrupted sync resumes from its last checkpoint instead of reloading
-     the whole table (with a "start fresh" override if you want a normal
-     truncate+reload instead).
-   - **Row-level error capture** — if a chunk's bulk `COPY` fails for a
-     data-level reason (bad encoding, a constraint violation not caught by
-     pre-flight, a type mismatch), it falls back to inserting that chunk
-     row-by-row so one bad row doesn't lose the rest of the table. Skipped
-     rows are logged with their row reference and error.
-   - **Retry with backoff** on transient connection errors (3 retries,
-     exponential 1s/2s/4s) for both Oracle and Postgres calls.
-   - **Live progress over SSE**: rows loaded, rows/sec throughput, and an ETA,
-     in addition to retry/constraint-drop/restore events.
-7. **History** — every sync run of the active set (table, start/end time,
-   duration, rows loaded/skipped, status) is logged to SQLite and browsable
-   here, so you can
-   spot which tables are slow or fail often. Row-level error detail is
-   viewable inline and the full run log (summary + row errors) can be
-   downloaded as a text file for sharing outside the app.
-
-A minimal footer with attribution appears on every page.
-
-State (sets with their connections, column mappings, checkpoints and sync
-history) lives in `data-flow.db` (SQLite, gitignored). Each import first saves
-the old state as `data-flow.db.bak-<date>` next to it (also gitignored); delete
-those once you no longer need them, as they hold passwords too.
-
-## Project layout
 ```
 data-flow/
-├─ pyproject.toml          # packaging + the `data-flow` entry point
-├─ run.sh / run.bat
-├─ LICENSE                 # Apache 2.0
-├─ README.md
-├─ tests/                   # pure checks: run with `python tests/test_*.py`
+├─ pyproject.toml          # packaging and the `data-flow` command
+├─ run.sh / run.bat        # create a venv, install, start
+├─ build_package.py        # portable Windows zip with its own Python
+├─ tests/                  # plain-script checks
 └─ src/dataflow/
-   ├─ cli.py               # console command -> launches uvicorn
-   ├─ main.py              # FastAPI routes (sets, config, test, tables, mapping, migrate, sync/SSE, history, export/import)
-   ├─ engine.py            # orchestration: create/recreate, compare, dry run, chunked sync stream
-   ├─ oracle_client.py     # Oracle connect + metadata + chunked/ordered reads (thin mode)
-   ├─ pg_client.py         # Postgres connect + DDL + COPY/row-insert load + constraint introspection (psycopg3)
-   ├─ groups.py            # table groups: join/union of several Oracle tables into one target
-   ├─ mapping.py           # per-table column rename/skip/type overrides + drift fingerprinting
-   ├─ types_map.py         # Oracle -> Postgres type translation
-   ├─ depgraph.py          # topological sort for FK-safe constraint recreation order
-   ├─ retry.py             # transient-error retry/backoff, shared by both DB clients
-   ├─ preflight.py         # connectivity + privilege checks run before a sync starts
-   ├─ history.py           # SQLite: sync checkpoints, run history, row-level error log
-   ├─ sets.py              # sets (Oracle/Postgres pairs): create/switch/delete, export/import
-   ├─ store.py             # SQLite key/value settings store, per set (connections, selection, mappings)
-   └─ static/              # UI (index.html, app.js, style.css, favicon.ico)
+   ├─ cli.py               # `data-flow` command: starts uvicorn
+   ├─ main.py              # FastAPI routes
+   ├─ engine.py            # create/recreate, compare, dry run, chunked sync
+   ├─ oracle_client.py     # Oracle metadata and chunked reads (thin mode)
+   ├─ pg_client.py         # Postgres DDL, COPY / row-insert load, constraints
+   ├─ groups.py            # join / union / split groups
+   ├─ mapping.py           # column mappings, dictionaries, lookups, drift fingerprints
+   ├─ sets.py              # sets: create/switch/delete, export/import
+   ├─ store.py             # SQLite settings store, per set
+   ├─ history.py           # SQLite checkpoints, sync runs, row errors
+   ├─ types_map.py         # Oracle → Postgres type translation
+   ├─ depgraph.py          # FK-safe order for recreating constraints
+   ├─ preflight.py         # checks run before a sync
+   ├─ retry.py             # retry with backoff for both clients
+   └─ static/              # the web UI
 ```
 
-## Notes / limits
-- Single-user, no auth — **bind to localhost or a trusted LAN only.** Connection
-  passwords are stored in plaintext in the SQLite state file; don't expose publicly.
-  An export leaves passwords out unless **Include passwords** is ticked.
-- `types_map.py` covers common Oracle types; extend it for exotic ones.
-- Row-count estimates on the Tables tab come from Oracle's optimizer
-  statistics, not a live count — they can be stale on tables with heavy recent
-  DML but stay fast even on schemas with thousands of tables. Compare/sync
-  elsewhere in the app always use exact counts.
-- Disk space estimation before a sync is intentionally out of scope.
-- A **join group requires a primary key** — or a unique constraint whose
-  columns are all `NOT NULL` — on *every* source. The joined result is paged
-  by the combination of all of them; without a total order, rows sharing the
-  driving table's key straddle a page boundary and the ones after the first
-  are silently skipped. A source with neither is refused rather than loaded
-  incorrectly.
-- A join to a one-to-many relationship **multiplies rows** (one order with
-  three lines gives three result rows, repeating the order's columns). That's
-  normal SQL join behaviour, not a bug — use the row counts on Migrate &
-  Sync, where a join group's Oracle number is the count of the *joined*
-  result, to see what you'll actually get.
-- A **union group** is append-only and doesn't de-duplicate: a row present in
-  two sources lands twice, tagged with different `_source_table` values. Don't
-  drop that column — re-syncing one source issues
-  `DELETE ... WHERE _source_table = ?` rather than a `TRUNCATE`, which on a
-  large source is slower and leaves dead rows for autovacuum.
-- Groups are **load-only**: data flows Oracle → the combined Postgres table.
-  Nothing writes back, and the group doesn't track which source a joined
-  column came from once it's loaded.
-- Sync reads chunks by primary key (`WHERE pk > last`), so chunk cost stays
-  flat across a large table. Tables **without a primary key** fall back to
-  `OFFSET` paging ordered by ROWID, which re-reads and discards every earlier
-  row — fine for small tables, quadratic on big ones.
-- If the browser closes mid-sync, fast-load constraints are restored before the
-  connections close, but silently (there's no stream left to report on). A hard
-  kill of the server process while a fast-load sync is between the drop and the
-  restore will leave those tables without their PK/FK/indexes — recreate the
-  table, or re-run the sync, to get them back.
-
 ## Roadmap
-- Optional **ora2pg-backed DDL** path as an alternative to `types_map.py`.
-- Parallel per-table sync (currently sequential within one run).
+
+- Optional ora2pg-based DDL as an alternative to `types_map.py`.
+- Syncing several tables in parallel.
 
 ## License
-Apache License 2.0 — see [LICENSE](LICENSE).
 
-© 2026 Sadman Rahamat Bishal
+[Apache License 2.0](LICENSE). © 2026 [Sadman Rahamat Bishal](https://sadmanbishal.com)

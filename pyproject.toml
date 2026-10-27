@@ -7,7 +7,7 @@ name = "data-flow"
 version = "0.3.0"
 description = "Selective Oracle to PostgreSQL table & data migration with a web GUI"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Sadman" }]
 keywords = ["oracle", "postgresql", "migration", "etl", "database"]
 dependencies = [
