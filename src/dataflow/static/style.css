@@ -24,7 +24,8 @@ header {
 h1 { margin: 0 0 12px; font-size: 18px; font-weight: 600; display: flex; align-items: center; }
 .brand-icon { width: 20px; height: 20px; margin-right: 8px; border-radius: 4px; }
 .subtitle { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 8px; }
-.github-link { display: flex; align-items: center; flex-shrink: 0; margin-left: 16px; opacity: 0.85; transition: opacity .15s; }
+.header-right { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; min-width: 0; }
+.github-link { display: flex; align-items: center; flex-shrink: 0; opacity: 0.85; transition: opacity .15s; }
 .github-link:hover { opacity: 1; }
 .github-icon { height: 16px; width: auto; filter: invert(1); }
 h2 { margin: 0 0 12px; font-size: 15px; }
@@ -69,6 +70,13 @@ button.secondary:hover:not(:disabled) { background: #34424f; filter: none; }
 button.danger { background: var(--err); color: #fff; }
 button:disabled { opacity: .5; cursor: default; }
 a.link { color: var(--accent); font-size: 13px; }
+/* a link doing a button's job (downloads): looks like button.secondary */
+a.btn {
+  display: inline-block; background: #2b3742; color: var(--text); padding: 8px 16px;
+  border-radius: 6px; font-size: 14px; line-height: normal; text-decoration: none; transition: background .15s;
+}
+a.btn:hover { background: #34424f; }
+a.btn.btn-sm, button.btn-sm { padding: 4px 10px; font-size: 12.5px; }
 .status { font-size: 13px; }
 .status.ok { color: var(--ok); }
 .status.err { color: var(--err); }
@@ -172,10 +180,6 @@ select {
   background: #0b0f14; padding: 10px 16px; font-size: 12.5px; max-height: 240px; overflow: auto;
 }
 #history_table .errors-detail div { padding: 2px 0; }
-#history_table button.link {
-  background: transparent; color: var(--accent); border: none; padding: 0;
-  font-size: 12.5px; cursor: pointer; text-decoration: underline;
-}
 
 /* ---- footer ---- */
 .app-footer {
@@ -226,11 +230,61 @@ td.has-data { background: rgba(63,185,80,.15); box-shadow: inset 3px 0 0 var(--o
 #import_file[hidden] { display: none; }  /* input { display: block } would otherwise win */
 #first_run[hidden] { display: none; }  /* likewise .row { display: flex } */
 
-/* dictionary viewer popup */
-#dict_view {
-  width: min(720px, 92vw); max-height: 85vh; padding: 18px;
+/* popups */
+dialog {
+  width: min(520px, 92vw); max-height: 85vh; padding: 18px;
   background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
 }
-#dict_view::backdrop { background: rgba(0, 0, 0, .6); }
+dialog::backdrop { background: rgba(0, 0, 0, .6); }
+dialog .tablelist { max-height: 40vh; overflow-y: auto; margin-bottom: 12px; }
+#import_overwrite_row[hidden], #dict_import_btn[hidden] { display: none; }
+
+/* the set menu, top right: the active set's colour on its button */
+.set-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--accent); }
+#set_btn { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); max-width: 40vw; }
+#set_name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#set_menu {
+  inset: auto; margin: 0; padding: 6px; min-width: 240px; max-height: 80vh; overflow-y: auto;
+  background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .5);
+}
+#set_menu button {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: transparent; color: var(--text); padding: 7px 10px;
+}
+#set_menu button:hover { background: var(--panel); filter: none; }
+#set_menu button.active::after { content: "\2713"; margin-left: auto; color: var(--ok); }
+#set_menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+.set-card { margin-bottom: 20px; padding-bottom: 6px; }
+.set-card .row { margin: 0; align-items: flex-end; }
+.set-card label { margin: 0 0 12px; }
+.set-card .row > button, .set-card .row > .status { margin-bottom: 12px; }
+.set-card .set-io { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin: 0 0 12px auto; }
+#set_edit_name { min-width: 240px; }
+#set_edit_color { width: 48px; height: 35px; padding: 2px; }
+
+/* a dictionary's entries (popup) */
+#dict_view { width: min(720px, 92vw); }
 #dict_view .row { justify-content: space-between; margin-top: 0; }
-#dict_view .dict-view-scroll { max-height: 60vh; overflow-y: auto; }
+#dict_view .dict-view-scroll { max-height: 50vh; overflow-y: auto; }
+#dict_view_add { margin: 12px 0 0; }
+#dict_view_add input { flex: 1; width: auto; margin: 0; }
+
+/* Dictionaries tab: dictionaries and lookups as cards; used ones stand out.
+   The Mappings tab shows the open table's ones in a scrolling list, and the
+   same forms (#dict_forms moves between the two tabs). */
+#dictionaries h3, #dict_forms h3 { margin: 18px 0 8px; }
+#col_dict_list { overflow-y: auto; }
+#columns > .cols { grid-template-columns: 280px minmax(0, 1fr) 340px; }
+#col_dicts > .row { justify-content: space-between; margin-top: 0; }
+/* folded: a slim strip with a vertical "Dictionaries · n" button */
+#columns.dicts-collapsed > .cols { grid-template-columns: 280px minmax(0, 1fr) 46px; }
+#columns.dicts-collapsed #col_dicts { padding: 10px 4px; }
+#columns.dicts-collapsed #col_dicts h2, #columns.dicts-collapsed #col_dicts_body { display: none; }
+#columns.dicts-collapsed #col_dicts > .row { justify-content: center; margin: 0; }
+#columns.dicts-collapsed #col_dicts_toggle { writing-mode: vertical-rl; padding: 10px 4px; }
+.grid-scroll { overflow-x: auto; }
+.dict-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; align-items: start; }
+.mapping-item.used { border-color: var(--ok); box-shadow: inset 3px 0 0 var(--ok); }
+.used-by { flex-basis: 100%; color: var(--ok); font-size: 12px; white-space: pre-line; }
+.used-by.unused { color: var(--muted); }

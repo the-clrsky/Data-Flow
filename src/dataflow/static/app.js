@@ -24,6 +24,9 @@ document.querySelectorAll(".tab").forEach((t) => {
     t.classList.add("active");
     $(t.dataset.tab).classList.add("active");
     if (t.dataset.tab === "groups") loadGroups();
+    // one set of dictionary forms, shown on whichever of the two tabs is open
+    if (t.dataset.tab === "dictionaries") { $("dict_forms_home").append($("dict_forms")); loadDictionaries(); }
+    if (t.dataset.tab === "columns") $("col_dicts_body").append($("dict_forms"));
     if (t.dataset.tab === "columns") { loadMappingSummary(); loadDictionaries(); }
     if (t.dataset.tab === "migrate") { refreshCompare(); refreshDriftPanel(); refreshCheckpointPanel(); }
     if (t.dataset.tab === "history") loadHistory();
@@ -54,10 +57,8 @@ async function loadConfig() {
   }
   selection = c.selection || [];
   // a fresh install: offer the settings from an older copy or another PC
-  $("first_run").hidden = !!(c.oracle || c.pg);
+  $("first_run").hidden = !!(c.oracle || c.pg) || allSets.length > 1;
 }
-
-$("first_run_import").onclick = () => $("import_file").click();
 
 $("o_save").onclick = async () => {
   const body = {
@@ -173,64 +174,153 @@ function fillDictSelect(sel, value) {
   sel.onchange?.();
 }
 
+// Where a dictionary or lookup is used: every saved mapping column that goes
+// through it (highlighted), or a note that none does.
+function usedBy(item, users) {
+  const line = (text, cls) => Object.assign(document.createElement("span"), { className: cls, textContent: text });
+  if (!users?.length) return line("Not used by any mapping", "used-by unused");
+  item.classList.add("used");
+  return line("Used by:\n" + users.join("\n"), "used-by");
+}
+
+let dictData = { dictionaries: [], lookups: {}, used_by: {} };  // the last /api/dictionaries
+
+// Saved mapping columns using `name`, all or only those of mapping `table`
+const usersOf = (name, table) => (dictData.used_by[name] || []).filter((u) => !table || u.startsWith(table + "."));
+
+// One dictionary as a card: name and size, where it's used (only by `table`,
+// when given), View / Download / Delete. A click picks it for the upload form.
+function dictItem(d, table) {
+  const item = document.createElement("div");
+  item.className = "mapping-item row";
+  item.style.margin = "0";
+  const del = Object.assign(document.createElement("button"), { className: "danger", textContent: "Delete" });
+  del.onclick = async () => {
+    if (!confirm(`Delete dictionary ${d.name}? Columns using it will fail to sync until you pick another.`)) return;
+    const x = await api("/api/dictionaries/" + encodeURIComponent(d.name), { method: "DELETE" });
+    if (x.error) return setStatus($("dict_status"), x.error, false);
+    loadDictionaries();
+  };
+  const csv = Object.assign(document.createElement("a"), {
+    className: "btn", textContent: "Download",
+    href: "/api/dictionaries/" + encodeURIComponent(d.name) + "/export",
+  });
+  const view = Object.assign(document.createElement("button"), { className: "secondary", textContent: "View" });
+  view.onclick = () => openDictView(d.name);
+  item.append(Object.assign(document.createElement("span"), {
+    className: "mapping-item-name", textContent: `${d.name} (${d.entries} entries)`, style: "flex: 1 1 100%",
+  }), usedBy(item, usersOf(d.name, table)), view, csv, del);
+  item.onclick = (e) => { if (e.target === item || e.target.tagName === "SPAN") $("dict_name").value = d.name; };
+  return item;
+}
+
+// One Postgres lookup as a card: its link (table, match and value columns),
+// where it's used (only by `table`, when given), Delete. A click loads it into
+// the lookup form.
+function lookupItem(name, table) {
+  const lk = dictData.lookups[name];
+  const item = document.createElement("div");
+  item.className = "mapping-item row";
+  item.style.margin = "0";
+  const del = Object.assign(document.createElement("button"), { className: "danger", textContent: "Delete" });
+  del.onclick = async () => {
+    if (!confirm(`Delete lookup ${name}? Columns using it will fail to sync until you pick another.`)) return;
+    const x = await api("/api/lookups/" + encodeURIComponent(name), { method: "DELETE" });
+    if (x.error) return setStatus($("lk_status"), x.error, false);
+    loadDictionaries();
+  };
+  item.append(Object.assign(document.createElement("span"), {
+    className: "mapping-item-name", style: "flex: 1",
+    textContent: `${name}: ${lk.table}.${lk.value} where ${lk.match.join(", ")} match`,
+  }), del, usedBy(item, usersOf(name, table)));
+  item.onclick = (e) => {
+    if (e.target !== item && e.target.tagName !== "SPAN") return;
+    $("lk_name").value = name;
+    $("lk_table").value = lk.table;
+    $("lk_match").value = lk.match.join(", ");
+    $("lk_value").value = lk.value;
+  };
+  return item;
+}
+
 async function loadDictionaries() {
   const r = await api("/api/dictionaries");
   if (r.error) return setStatus($("dict_status"), r.error, false);
+  dictData = { dictionaries: r.dictionaries, lookups: r.lookups, used_by: r.used_by || {} };
   lookupDefs = r.lookups;
   dictNames = [...r.dictionaries.map((d) => d.name), ...Object.keys(lookupDefs).sort()];
   document.querySelectorAll("#col_grid .col-dict").forEach((s) => fillDictSelect(s, s.value));
-  $("lk_list").replaceChildren(...Object.keys(lookupDefs).sort().map((name) => {
-    const lk = lookupDefs[name];
-    const item = document.createElement("div");
-    item.className = "mapping-item row";
-    item.style.margin = "0";
-    const del = Object.assign(document.createElement("button"), { className: "danger", textContent: "Delete" });
-    del.onclick = async () => {
-      if (!confirm(`Delete lookup ${name}? Columns using it will fail to sync until you pick another.`)) return;
-      const x = await api("/api/lookups/" + encodeURIComponent(name), { method: "DELETE" });
-      if (x.error) return setStatus($("lk_status"), x.error, false);
-      loadDictionaries();
-    };
-    item.append(Object.assign(document.createElement("span"), {
-      className: "mapping-item-name", style: "flex: 1",
-      textContent: `${name}: ${lk.table}.${lk.value} where ${lk.match.join(", ")} match`,
-    }), del);
-    // pick to edit
-    item.onclick = (e) => {
-      if (e.target !== item && e.target.tagName !== "SPAN") return;
-      $("lk_name").value = name;
-      $("lk_table").value = lk.table;
-      $("lk_match").value = lk.match.join(", ");
-      $("lk_value").value = lk.value;
-    };
-    return item;
-  }));
-  $("dict_list").replaceChildren(...r.dictionaries.map((d) => {
-    const item = document.createElement("div");
-    item.className = "mapping-item row";
-    item.style.margin = "0";
-    const del = Object.assign(document.createElement("button"), { className: "danger", textContent: "Delete" });
-    del.onclick = async () => {
-      if (!confirm(`Delete dictionary ${d.name}? Columns using it will fail to sync until you pick another.`)) return;
-      const x = await api("/api/dictionaries/" + encodeURIComponent(d.name), { method: "DELETE" });
-      if (x.error) return setStatus($("dict_status"), x.error, false);
-      loadDictionaries();
-    };
-    const csv = Object.assign(document.createElement("a"), {
-      className: "link", textContent: "Download",
-      href: "/api/dictionaries/" + encodeURIComponent(d.name) + "/export",
-    });
-    const view = Object.assign(document.createElement("button"), { className: "secondary", textContent: "View" });
-    view.onclick = () => openDictView(d.name);
-    // the name gets its own line: the card is too narrow for it and three controls
-    item.append(Object.assign(document.createElement("span"), {
-      className: "mapping-item-name", textContent: `${d.name} (${d.entries} entries)`, style: "flex: 1 1 100%",
-    }), view, csv, del);
-    // pick to update: uploads and pasted rows go to the name in the box
-    item.onclick = (e) => { if (e.target === item || e.target.tagName === "SPAN") $("dict_name").value = d.name; };
-    return item;
-  }));
+  renderDicts();
+  renderTableDicts();
 }
+
+// At most `n` items in view, the rest scroll. Measured, so items of any
+// height fit; a list on a hidden tab is measured when the tab opens.
+function capList(list, n = 5) {
+  list.style.maxHeight = "";
+  if (list.children.length <= n || !list.offsetHeight) return;
+  list.style.maxHeight = `${list.children[n - 1].getBoundingClientRect().bottom - list.getBoundingClientRect().top}px`;
+}
+
+// The Mappings tab's Dictionaries column: the dictionaries and lookups the
+// open table's saved mapping uses.
+function renderTableDicts() {
+  const t = currentColTable;
+  const mine = (name) => usersOf(name, t).length > 0;
+  const items = !t ? [] : [
+    ...dictData.dictionaries.filter((d) => mine(d.name)).map((d) => dictItem(d, t)),
+    ...Object.keys(dictData.lookups).sort().filter(mine).map((n) => lookupItem(n, t)),
+  ];
+  $("col_dict_list").replaceChildren(...items);
+  $("col_dicts_note").textContent = !t ? "Pick a table to see the dictionaries it uses."
+    : items.length ? `Used by ${t}'s saved mapping:`
+    : `${t}'s saved mapping uses no dictionary yet. Pick one in a column's Dictionary list, or add one below.`;
+  capList($("col_dict_list"));
+  colDictsToggleLabel(items.length);
+}
+
+// The Mappings tab's Dictionaries column can fold into a slim strip to give
+// the column grid room. Remembered per browser; works without storage too.
+const DICTS_FOLDED = "dataflow.dictsCollapsed";
+let colDictsCount = 0;  // dictionaries the open table uses, shown on the folded strip
+
+function colDictsToggleLabel(count = colDictsCount) {
+  colDictsCount = count;
+  const folded = $("columns").classList.contains("dicts-collapsed");
+  $("col_dicts_toggle").textContent = folded ? `Dictionaries${count ? ` · ${count}` : ""}` : "Hide";
+  $("col_dicts_toggle").title = folded ? "Show the Dictionaries column" : "Hide the Dictionaries column";
+}
+
+function foldColDicts(folded) {
+  $("columns").classList.toggle("dicts-collapsed", folded);
+  try { localStorage.setItem(DICTS_FOLDED, folded ? "1" : ""); } catch { /* storage blocked: just not remembered */ }
+  colDictsToggleLabel();
+  if (!folded) capList($("col_dict_list"));  // measured now that it's visible again
+}
+
+$("col_dicts_toggle").onclick = () => foldColDicts(!$("columns").classList.contains("dicts-collapsed"));
+try { foldColDicts(localStorage.getItem(DICTS_FOLDED) === "1"); } catch { foldColDicts(false); }
+
+// The Dictionaries tab's cards, filtered by the search box: name, the Oracle
+// and Postgres columns and tables using it, and a lookup's own table and columns.
+function renderDicts() {
+  const f = $("dict_search").value.trim().toLowerCase();
+  const hit = (...texts) => !f || texts.flat().some((t) => t.toLowerCase().includes(f));
+  const used = (name) => dictData.used_by[name] || [];
+  const dicts = dictData.dictionaries.filter((d) => hit(d.name, used(d.name)));
+  const lookups = Object.keys(dictData.lookups).sort().filter((n) => {
+    const lk = dictData.lookups[n];
+    return hit(n, used(n), lk.table, lk.match, lk.value);
+  });
+  const fill = (box, items, none) => box.replaceChildren(...(items.length ? items
+    : [Object.assign(document.createElement("p"), { className: "status", textContent: none })]));
+  fill($("dict_list"), dicts.map((d) => dictItem(d)), f ? "No dictionary matches." : "No dictionaries yet - add one on the right.");
+  fill($("lk_list"), lookups.map((n) => lookupItem(n)), f ? "No lookup matches." : "No lookups yet - add one on the right.");
+  const total = dictData.dictionaries.length + Object.keys(dictData.lookups).length;
+  $("dict_count").textContent = f ? `${dicts.length + lookups.length} of ${total} match` : `${total} in all`;
+}
+
+$("dict_search").oninput = renderDicts;
 
 // body: the file (or pasted text) as is; the server reads .xlsx or delimited text by filename
 async function sendDictRows(body, filename, replace) {
@@ -248,17 +338,43 @@ async function sendDictRows(body, filename, replace) {
 // ---------- dictionary viewer (popup) ----------
 const DICT_VIEW_MAX = 500;  // rows drawn at once; search narrows the rest
 let dictViewEntries = [];
+let dictViewName = null;
+
+async function loadDictView() {
+  const r = await api("/api/dictionaries/" + encodeURIComponent(dictViewName));
+  if (r.error) return r;
+  dictViewEntries = r.entries;
+  $("dict_view_title").textContent = `${dictViewName} (${fmt(r.entries.length)} entries)`;
+  renderDictView();
+  return r;
+}
 
 async function openDictView(name) {
-  const r = await api("/api/dictionaries/" + encodeURIComponent(name));
-  if (r.error) return setStatus($("dict_status"), r.error, false);
-  dictViewEntries = r.entries;
-  $("dict_view_title").textContent = `${name} (${fmt(r.entries.length)} entries)`;
+  dictViewName = name;
   $("dict_view_search").value = "";
-  renderDictView();
+  setStatus($("dict_view_status"), "");
+  const r = await loadDictView();
+  if (r.error) return setStatus($("dict_status"), r.error, false);
   $("dict_view").showModal();
   $("dict_view_search").focus();
 }
+
+// one entry, through the same add/update route as uploads
+$("dict_view_add").onsubmit = async (e) => {
+  e.preventDefault();
+  const [o, p] = [$("dict_view_old").value.trim(), $("dict_view_new").value.trim()];
+  if (!o || !p) return setStatus($("dict_view_status"), "Fill in both values", false);
+  const csv = (v) => `"${v.replaceAll('"', '""')}"`;  // values may hold commas or quotes
+  const r = await api(`/api/dictionaries/${encodeURIComponent(dictViewName)}?filename=rows.csv`,
+    { method: "POST", body: `oracle,postgres\n${csv(o)},${csv(p)}\n` });
+  if (r.error) return setStatus($("dict_view_status"), r.error, false);
+  setStatus($("dict_view_status"),
+    r.added ? `Added ${o} → ${p}` : r.updated ? `Updated ${o} → ${p}` : `${o} → ${p} was already there`, true);
+  $("dict_view_old").value = $("dict_view_new").value = "";
+  $("dict_view_old").focus();
+  await loadDictView();
+  loadDictionaries();  // the entry count in the list
+};
 
 function renderDictView() {
   const f = $("dict_view_search").value.trim().toLowerCase();
@@ -579,6 +695,7 @@ $("col_use_all").onchange = () => {
 
 async function loadColumns(table) {
   currentColTable = table;
+  renderTableDicts();
   // extra mappings are keyed "ORACLE_TABLE:n"
   const [oracleTable, n] = table.split(":");
   $("col_table_title").textContent = n ? `${oracleTable} (mapping ${n})` : table;
@@ -692,7 +809,7 @@ async function onPgTableChange() {
   $("pg_cols_list").innerHTML = (pgCols || [])
     .map((c) => `<option value="${c.name}">${c.type}</option>`).join("");
   $("col_pg_existing").textContent = pgCols
-    ? `Existing table (${pgCols.length} columns): pick the Postgres column for each Oracle column. A full sync replaces all rows in it.`
+    ? `Existing table (${pgCols.length} columns): pick the Postgres column for each Oracle column. A full sync replaces all rows in it, unless Upsert is ticked.`
     : "";
   fillPgColSelects();
   checkTargets();
@@ -807,6 +924,7 @@ $("col_save").onclick = async () => {
   setStatus($("columns_status"), "Saved", true);
   loadPgTables(true);
   loadMappingSummary();
+  loadDictionaries();  // the Dictionaries column lists what the saved mapping uses
 };
 
 $("col_new").onclick = async () => {
@@ -1345,7 +1463,7 @@ function runSync(tables, freshTables) {
       logLine(`✓ ${m.table}: ${fmt(m.rows_loaded)} rows loaded${changes}${skipped}  (oracle ${fmt(m.oracle)} / pg ${fmt(m.pg)}) ${m.match ? "MATCH" : "MISMATCH"}`);
       (m.dictionary_misses || []).forEach((x) => logLine(
         `⚠ ${m.table}.${x.column}: ${fmt(x.values.length)}${x.capped ? "+" : ""} value(s) not in dictionary ${x.dictionary} — those rows were skipped. ` +
-        `Add them on the Mappings tab and sync again:\n    ${x.values.join(", ")}`));
+        `Add them on the Dictionaries tab and sync again:\n    ${x.values.join(", ")}`));
       checkpointTables.delete(m.table);
       renderCheckpointPanel();
     }
@@ -1500,7 +1618,7 @@ async function loadHistory() {
     const actions = tr.lastElementChild;
     if (run.rows_skipped) {
       const errBtn = document.createElement("button");
-      errBtn.className = "link";
+      errBtn.className = "secondary btn-sm";
       errBtn.textContent = "View errors";
       errBtn.onclick = () => toggleRunErrors(run.id, tr);
       actions.appendChild(errBtn);
@@ -1508,7 +1626,7 @@ async function loadHistory() {
     const dl = document.createElement("a");
     dl.href = `/api/sync-runs/${run.id}/export`;
     dl.textContent = "Download";
-    dl.className = "link";
+    dl.className = "btn btn-sm";
     dl.style.marginLeft = "10px";
     actions.appendChild(dl);
     tb.appendChild(tr);
@@ -1539,25 +1657,204 @@ async function toggleRunErrors(runId, afterRow) {
 
 $("history_refresh").onclick = loadHistory;
 
-loadConfig();
-
 // floating jump-to-top / jump-to-bottom buttons
 $("scroll_top").onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
 $("scroll_bottom").onclick = () => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
 
-// ---------- import (the counterpart of "Export all data") ----------
-$("import_btn").onclick = () => $("import_file").click();
+// ---------- sets (menu at the top right) ----------
+let allSets = [];
+let activeSet = null;
+
+const checkedValues = (box) => [...box.querySelectorAll("input:checked")].map((c) => c.value);
+function checkItem(value, text, checked) {
+  const label = document.createElement("label");
+  const cb = Object.assign(document.createElement("input"), { type: "checkbox", value, checked });
+  label.append(cb, document.createTextNode(text));
+  return label;
+}
+
+async function loadSets() {
+  const r = await api("/api/sets");
+  if (r.error) return alert(r.error);
+  allSets = r.sets;
+  activeSet = r.sets.find((s) => s.id === r.active);
+  $("set_name").textContent = activeSet.name;
+  $("set_dot").style.background = $("set_btn").style.borderColor = activeSet.color;
+  document.title = `${activeSet.name} · Data Flow`;
+  $("set_edit_name").value = activeSet.name;
+  $("set_edit_color").value = activeSet.color;
+  $("set_delete").disabled = allSets.length < 2;
+  $("dict_import_btn").hidden = allSets.length < 2;
+  $("set_list").replaceChildren(...allSets.map((s) => {
+    const b = document.createElement("button");
+    const dot = Object.assign(document.createElement("span"), { className: "set-dot" });
+    dot.style.background = s.color;
+    b.append(dot, document.createTextNode(s.name));
+    b.classList.toggle("active", s.id === activeSet.id);
+    b.onclick = () => switchSet(s.id);
+    return b;
+  }));
+}
+
+// Every tab shows the active set, so a switch reloads the page - on the tab that was open.
+function reloadHere() {
+  location.hash = document.querySelector(".tab.active").dataset.tab;
+  location.reload();
+}
+
+async function switchSet(id) {
+  if (id === activeSet.id) return;
+  const r = await api(`/api/sets/${id}/activate`, { method: "POST" });
+  if (r.error) return alert(r.error);
+  reloadHere();
+}
+
+const postJson = (url, body, method = "POST") =>
+  api(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+// the menu sits under its button; it's in the top layer, so placed by hand
+$("set_menu").addEventListener("beforetoggle", (e) => {
+  if (e.newState !== "open") return;
+  const b = $("set_btn").getBoundingClientRect();
+  $("set_menu").style.top = `${b.bottom + 6}px`;
+  $("set_menu").style.right = `${document.documentElement.clientWidth - b.right}px`;
+});
+$("set_menu").addEventListener("click", (e) => { if (e.target.closest("button")) $("set_menu").hidePopover(); });
+document.querySelectorAll("#set_menu [data-same]").forEach((b) => { b.onclick = () => $(b.dataset.same).click(); });
+
+$("set_new").onclick = async () => {
+  const name = prompt("Name of the new set (it starts empty):");
+  if (!name) return;
+  const r = await postJson("/api/sets", { name });
+  if (r.error) return alert(r.error);
+  switchSet(r.result);
+};
+
+$("set_save").onclick = async () => {
+  const r = await postJson(`/api/sets/${activeSet.id}`,
+    { name: $("set_edit_name").value, color: $("set_edit_color").value }, "PUT");
+  setStatus($("set_status"), r.error || "Saved", !r.error);
+  if (!r.error) loadSets();
+};
+
+$("set_save_as").onclick = async () => {
+  const name = prompt("Name of the new set. It gets this set's saved Oracle and Postgres connections; " +
+                      "tables, groups, dictionaries and mappings start empty.", `${activeSet.name} copy`);
+  if (!name) return;
+  const r = await postJson("/api/sets", { name, copy_connections: true });
+  if (r.error) return setStatus($("set_status"), r.error, false);
+  switchSet(r.result);
+};
+
+$("set_delete").onclick = async () => {
+  if (!confirm(`Delete the set ${activeSet.name} - its connections, tables, groups, dictionaries, mappings and sync history?\n\n` +
+               "Oracle and Postgres are not touched. Export it first to keep a copy.")) return;
+  const r = await api(`/api/sets/${activeSet.id}`, { method: "DELETE" });
+  if (r.error) return setStatus($("set_status"), r.error, false);
+  reloadHere();
+};
+
+// ---------- export ----------
+function openExport(ids) {
+  $("export_sets").replaceChildren(...allSets.map((s) => checkItem(s.id, s.name, ids.includes(s.id))));
+  $("export_passwords").checked = false;
+  setStatus($("export_status"), "");
+  $("export_dlg").showModal();
+}
+$("set_export_one").onclick = () => openExport([activeSet.id]);
+$("set_export_some").onclick = () => openExport([]);
+$("set_export_all").onclick = () => openExport(allSets.map((s) => s.id));
+$("export_cancel").onclick = () => $("export_dlg").close();
+$("export_go").onclick = () => {
+  const ids = checkedValues($("export_sets"));
+  if (!ids.length) return setStatus($("export_status"), "Tick at least one set", false);
+  Object.assign(document.createElement("a"), {
+    href: `/api/export?sets=${ids}&passwords=${$("export_passwords").checked}`, download: "",
+  }).click();
+  $("export_dlg").close();
+};
+
+// ---------- import ----------
+let importFile = null;
+$("set_import").onclick = $("first_run_import").onclick = () => $("import_file").click();
 $("import_file").onchange = async () => {
   const file = $("import_file").files[0];
   $("import_file").value = "";
   if (!file) return;
-  if (!confirm(`Replace ALL connections, mappings, groups and history here with the contents of ${file.name}?\n\n` +
-               "A backup of the current data is kept next to the database file.")) return;
-  // started from the History tab or the first-run prompt on Connections
-  const status = $("connections").classList.contains("active") ? $("first_run_status") : $("history_status");
-  setStatus(status, "Importing…");
-  const r = await api("/api/import", { method: "POST", body: file });
-  if (r.error) return setStatus(status, r.error, false);
-  alert(`Imported. The previous data was saved as ${r.backup}.\nThe page will reload.`);
-  location.reload();
+  const r = await api("/api/import?mode=inspect", { method: "POST", body: file });
+  if (r.error) return alert(r.error);
+  importFile = file;
+  $("import_title").textContent = `Import ${file.name}`;
+  $("import_sets").replaceChildren(...r.sets.map((s) =>
+    checkItem(s.id, s.name + (s.exists ? " — you have a set with this name" : ""), true)));
+  $("import_overwrite_row").hidden = !r.sets.some((s) => s.exists);
+  $("import_overwrite").checked = false;
+  setStatus($("import_status"), "");
+  $("import_dlg").showModal();
 };
+$("import_cancel").onclick = () => $("import_dlg").close();
+
+$("import_add").onclick = async () => {
+  const ids = checkedValues($("import_sets"));
+  if (!ids.length) return setStatus($("import_status"), "Tick at least one set", false);
+  setStatus($("import_status"), "Importing…");
+  const r = await api(`/api/import?mode=add&sets=${ids}&overwrite=${$("import_overwrite").checked}`,
+    { method: "POST", body: importFile });
+  if (r.error) return setStatus($("import_status"), r.error, false);
+  alert(`Added ${r.added.join(", ")}. The previous data was saved as ${r.backup}.\n` +
+        "Switch sets with the menu at the top right.");
+  reloadHere();
+};
+
+$("import_replace").onclick = async () => {
+  if (!confirm(`Replace ALL sets here - connections, mappings, groups, dictionaries and history - with the contents of ${importFile.name}?\n\n` +
+               "A backup of the current data is kept next to the database file.")) return;
+  setStatus($("import_status"), "Importing…");
+  const r = await api("/api/import?mode=replace", { method: "POST", body: importFile });
+  if (r.error) return setStatus($("import_status"), r.error, false);
+  alert(`Imported. The previous data was saved as ${r.backup}.\nThe page will reload.`);
+  reloadHere();
+};
+
+// ---------- dictionaries from another set (Dictionaries tab) ----------
+async function loadDictImportList() {
+  $("dict_import_all").checked = false;
+  const r = await api(`/api/sets/${$("dict_import_set").value}/dictionaries`);
+  if (r.error) return setStatus($("dict_import_status"), r.error, false);
+  const mine = new Set(dictData.dictionaries.map((d) => d.name));
+  $("dict_import_list").replaceChildren(...(r.dictionaries.length
+    ? r.dictionaries.map((d) => checkItem(d.name,
+        `${d.name} (${fmt(d.entries)} entries)${mine.has(d.name) ? " — replaces yours" : ""}`, false))
+    : [Object.assign(document.createElement("p"), { className: "status", textContent: "That set has no dictionaries." })]));
+}
+
+$("dict_import_btn").onclick = () => {
+  $("dict_import_set").replaceChildren(...allSets.filter((s) => s.id !== activeSet.id).map((s) => new Option(s.name, s.id)));
+  setStatus($("dict_import_status"), "");
+  $("dict_import").showModal();
+  loadDictImportList();
+};
+$("dict_import_set").onchange = loadDictImportList;
+$("dict_import_all").onchange = () =>
+  $("dict_import_list").querySelectorAll("input").forEach((c) => { c.checked = $("dict_import_all").checked; });
+$("dict_import_close").onclick = () => $("dict_import").close();
+
+$("dict_import_go").onclick = async () => {
+  const names = checkedValues($("dict_import_list"));
+  if (!names.length) return setStatus($("dict_import_status"), "Tick at least one dictionary", false);
+  const replacing = names.filter((n) => dictData.dictionaries.some((d) => d.name === n));
+  if (replacing.length && !confirm(`Replace your ${replacing.join(", ")} with the other set's?`)) return;
+  const r = await postJson("/api/dictionaries/import", { set_id: +$("dict_import_set").value, names });
+  if (r.error) return setStatus($("dict_import_status"), r.error, false);
+  setStatus($("dict_import_status"), `Imported ${names.join(", ")}`, true);
+  await loadDictionaries();
+  loadDictImportList();
+};
+
+// start on the tab a set switch / import reload came from
+loadSets().then(loadConfig).then(() => {
+  const tab = location.hash.slice(1);
+  if (!tab) return;
+  history.replaceState(null, "", location.pathname);
+  document.querySelector(`.tab[data-tab="${CSS.escape(tab)}"]`)?.click();
+});

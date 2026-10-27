@@ -44,6 +44,9 @@ assert fill([("A", "110", "110"), ("B", "9", "9")]) == (
 assert mapping.with_constants(None, m["constants"])([("A",)]) == ([("A", "1")], [])
 assert mapping.with_constants(None, []) is None
 
+# which mapping columns use a dictionary (shown highlighted in the UI)
+assert mapping.dictionary_users() == {"ORG": ["T.FLOOR_NO → organization_id"]}, mapping.dictionary_users()
+
 # validation
 for rows, why in [
     ([dict(name="", target="x", pg_only=True)], "fixed value"),

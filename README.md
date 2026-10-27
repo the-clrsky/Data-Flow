@@ -45,11 +45,22 @@ Python, so the people you send it to need neither Python nor internet. They
 unzip it and double-click `Data Flow.bat`; `READ-ME-FIRST.txt` inside explains
 the rest. `docs/` is only packed with `--with-docs` (its guides name internal
 systems). The zip never contains a `data-flow.db` (it holds passwords). To bring
-saved settings along, use History → **Export all data** on the old copy and
-**Import saved settings…** on the new one's Connections tab, or copy the old
-`data-flow.db` into the new folder before starting it.
+saved settings along, use **Export all** on the Connections tab of the
+old copy and **Import saved settings…** on the new one's Connections tab, or
+copy the old `data-flow.db` into the new folder before starting it.
 
 ## What it does
+
+**Sets.** A set is one Oracle/Postgres pair with everything built on it: its
+table selection, groups, dictionaries, lookups, mappings and sync history. The
+menu at the top right shows the active set (in its colour) and switches sets;
+every tab then shows that set. **+ New set…** starts an empty one; **Save as new
+set…** on Connections starts one with the current connections. Connections
+also exports one set, several, or all of them to a `.db` file, with or without
+passwords, and imports such a file: its sets are added next to yours (a set
+with a name you already have is overwritten, or comes in as "Name (2)"), or it
+replaces everything. Files exported before sets come in as one set,
+"Default". The Dictionaries tab can copy dictionaries from another set.
 
 1. **Connections** — enter + test Oracle and Postgres connections.
 2. **Tables** — list Oracle tables, filter, pick which to migrate, save the
@@ -69,7 +80,7 @@ saved settings along, use History → **Export all data** on the old copy and
      from the schema's foreign keys so you don't type column names.
      Columns from a left-joined table are declared nullable automatically,
      and name collisions between sources (two tables both having `NAME`)
-     are suffixed with the source table — a rename on the Columns tab
+     are suffixed with the source table — a rename on the Mappings tab
      overrides that.
    - **Union** — the tables are shaped alike and their rows are stacked.
      The target gets the union of their mapped columns plus a
@@ -86,14 +97,23 @@ saved settings along, use History → **Export all data** on the old copy and
    group is created, drift-checked and recreated as a unit: changing any
    member's mapping, the join conditions or the mode flags the whole group.
 
-4. **Columns** — per-table column mapping: rename columns, rename the target
+4. **Dictionaries** — value translations used by the column mappings.
+   **Dictionaries** are old → new value tables uploaded from Excel or CSV
+   (header `oracle,postgres`) or typed in. **Postgres lookups** take the value
+   from a table already in Postgres instead, e.g. the `id` of the row whose
+   `code` is the Oracle value, matching on one or more columns. Every
+   dictionary and lookup is shown as a card with the mapping columns that use
+   it (highlighted). Search by name, Oracle or Postgres column, or table.
+   **View** opens a dictionary's entries, where single entries can be added.
+
+5. **Mappings** — per-table column mapping: rename columns, rename the target
    table, skip columns, override the Postgres type, and flag a table for
    "fast load" (drop constraints/indexes/FKs before sync, recreate after).
    Detects **schema drift** — if the mapping changes after a table was
    created, it's flagged before the next sync so you can recreate deliberately
    rather than get a silent surprise.
 
-5. **Migrate & Sync**
+6. **Migrate & Sync**
    - Create the selected tables in Postgres (or recreate them to apply a
      changed mapping) and compare row counts side by side.
    - **Pre-flight checks** before every sync: both connections reachable,
@@ -118,7 +138,7 @@ saved settings along, use History → **Export all data** on the old copy and
      exponential 1s/2s/4s) for both Oracle and Postgres calls.
    - **Live progress over SSE**: rows loaded, rows/sec throughput, and an ETA,
      in addition to retry/constraint-drop/restore events.
-6. **History** — every sync run (table, start/end time, duration, rows
+7. **History** — every sync run (table, start/end time, duration, rows
    loaded/skipped, status) is logged to SQLite and browsable here, so you can
    spot which tables are slow or fail often. Row-level error detail is
    viewable inline and the full run log (summary + row errors) can be
@@ -150,7 +170,8 @@ data-flow/
    ├─ retry.py             # transient-error retry/backoff, shared by both DB clients
    ├─ preflight.py         # connectivity + privilege checks run before a sync starts
    ├─ history.py           # SQLite: sync checkpoints, run history, row-level error log
-   ├─ store.py             # SQLite key/value settings store (connections, selection, mappings)
+   ├─ sets.py              # sets (Oracle/Postgres pairs): create/switch/delete, export/import
+   ├─ store.py             # SQLite key/value settings store, per set (connections, selection, mappings)
    └─ static/              # UI (index.html, app.js, style.css, favicon.ico)
 ```
 

@@ -11,8 +11,8 @@ import time
 from . import store
 
 
-def _conn():
-    c = sqlite3.connect(store.DB_PATH)
+def ensure(c):
+    # table_name is "<set id>/<table>"; see store.py for sets
     c.execute("""CREATE TABLE IF NOT EXISTS sync_checkpoints(
         table_name TEXT PRIMARY KEY,
         last_offset INTEGER NOT NULL,
@@ -26,7 +26,8 @@ def _conn():
         ended_at REAL,
         rows_loaded INTEGER NOT NULL DEFAULT 0,
         rows_skipped INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'running'
+        status TEXT NOT NULL DEFAULT 'running',
+        set_id INTEGER NOT NULL DEFAULT 1
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS row_errors(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,14 +37,27 @@ def _conn():
         error TEXT NOT NULL,
         created_at REAL NOT NULL
     )""")
+    if "set_id" not in {r[1] for r in c.execute("PRAGMA table_info(sync_runs)")}:
+        # from before sets: it all belongs to set 1, like the settings (store.ensure)
+        c.execute("ALTER TABLE sync_runs ADD COLUMN set_id INTEGER NOT NULL DEFAULT 1")
+        c.execute("UPDATE sync_checkpoints SET table_name = '1/' || table_name")
+
+
+def _conn():
+    c = sqlite3.connect(store.DB_PATH)
+    ensure(c)
     return c
+
+
+def _ck(table):
+    return f"{store.active()}/{table}"
 
 
 # ---------- checkpoints (resumable chunked loads) ----------
 def get_checkpoint(table):
     with _conn() as c:
         row = c.execute(
-            "SELECT last_offset, updated_at FROM sync_checkpoints WHERE table_name=?", (table,)
+            "SELECT last_offset, updated_at FROM sync_checkpoints WHERE table_name=?", (_ck(table),)
         ).fetchone()
     return dict(last_offset=row[0], updated_at=row[1]) if row else None
 
@@ -53,21 +67,21 @@ def save_checkpoint(table, offset):
         c.execute(
             "INSERT INTO sync_checkpoints(table_name, last_offset, updated_at) VALUES(?, ?, ?) "
             "ON CONFLICT(table_name) DO UPDATE SET last_offset=excluded.last_offset, updated_at=excluded.updated_at",
-            (table, offset, time.time()),
+            (_ck(table), offset, time.time()),
         )
 
 
 def clear_checkpoint(table):
     with _conn() as c:
-        c.execute("DELETE FROM sync_checkpoints WHERE table_name=?", (table,))
+        c.execute("DELETE FROM sync_checkpoints WHERE table_name=?", (_ck(table),))
 
 
 # ---------- sync run history ----------
 def start_run(table, pg_table):
     with _conn() as c:
         cur = c.execute(
-            "INSERT INTO sync_runs(table_name, pg_table, started_at, status) VALUES (?, ?, ?, 'running')",
-            (table, pg_table, time.time()),
+            "INSERT INTO sync_runs(table_name, pg_table, started_at, status, set_id) VALUES (?, ?, ?, 'running', ?)",
+            (table, pg_table, time.time(), store.active()),
         )
         return cur.lastrowid
 
@@ -91,8 +105,8 @@ def list_runs(limit=200):
     with _conn() as c:
         rows = c.execute(
             "SELECT id, table_name, pg_table, started_at, ended_at, rows_loaded, rows_skipped, status "
-            "FROM sync_runs ORDER BY id DESC LIMIT ?",
-            (limit,),
+            "FROM sync_runs WHERE set_id=? ORDER BY id DESC LIMIT ?",
+            (store.active(), limit),
         ).fetchall()
     return [_run_row(r) for r in rows]
 

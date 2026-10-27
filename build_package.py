@@ -56,14 +56,14 @@ LOAD YOUR SAVED SETTINGS (connections, mappings, dictionaries, lookups, groups)
   - From an older copy of Data Flow on this PC: stop it, then copy its
     data-flow.db into this folder before starting. Or, after starting,
     click "Import saved settings..." on the Connections tab and pick that file.
-  - From another PC: there, open History > "Export all data" and send the
-    .db file. Here, click "Import saved settings..." on the Connections tab
-    (or History > "Import data...") and pick it.
-  Importing replaces everything here; the previous data is kept as a
-  data-flow.db.bak-<date> file in this folder.
+  - From another PC: there, click "Export all" (or "Export this set") on
+    the Connections tab and send the .db file. Here, click "Import saved
+    settings..." (or "Import...") on the Connections tab and pick it. Add its sets next to yours, or replace everything; either way the
+    previous data is kept as a data-flow.db.bak-<date> file in this folder.
 
-  The .db file includes connection passwords. Share it only with people who
-  may use those databases.
+  The .db file includes connection passwords only if "Include passwords" was
+  ticked when exporting. Share such a file only with people who may use
+  those databases.
 
 UPGRADE
   Unzip the new version over this folder (replace the files). data-flow.db

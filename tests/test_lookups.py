@@ -106,4 +106,7 @@ assert exprs[-1] == 't0."BRANCH"' and exprs.count('t0."BRANCH"') == 2, exprs
 assert after == {"customers"}
 assert engine._aliased_fill(None, "public", plan[3:], None)[1] is None  # T: nothing to fill
 
+# where a lookup is used, with the other columns it matches on
+assert "ORD.CODE (with BRANCH) → code" in mapping.dictionary_users()["CUST2"], mapping.dictionary_users()
+
 print("ok groups")

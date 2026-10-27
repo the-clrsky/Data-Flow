@@ -284,6 +284,35 @@ def delete_entries(name, oracle_values):
     return dict(removed=len(removed), not_found=sorted(keys - set(removed)), total=len(d))
 
 
+def dictionary_users():
+    """{dictionary or lookup name: ["TABLE.COLUMN → target", ...]} for every
+    used (not skipped) column of a saved mapping that goes through it. A
+    lookup matched on several columns adds " (with OTHER, ...)"."""
+    users = {}
+    for t, m in _all().items():
+        for col, d in m.get("columns", {}).items():
+            for dest in [d] + d.get("copies", []):
+                if dest.get("dictionary") and not dest.get("skip"):
+                    with_ = f' (with {", ".join(dest["lookup_with"])})' if dest.get("lookup_with") else ""
+                    users.setdefault(dest["dictionary"], []).append(
+                        f'{t}.{col}{with_} → {dest.get("target") or col.lower()}')
+    return users
+
+
+def import_dictionaries(from_set, names):
+    """Copy dictionaries `names` of set `from_set` into the active set,
+    replacing any of the same name here. Returns the names copied."""
+    theirs = store.get(_DICTS, {}, set_id=from_set)
+    missing = [n for n in names if n not in theirs]
+    if missing:
+        raise ValueError(f"That set has no dictionary {', '.join(missing)}.")
+    clash = [n for n in names if n in lookups()]
+    if clash:
+        raise ValueError(f"{', '.join(clash)}: already a Postgres lookup here - rename or delete it first.")
+    store.put(_DICTS, dictionaries() | {n: theirs[n] for n in names})
+    return names
+
+
 def delete_dictionary(name):
     all_d = dictionaries()
     all_d.pop(name, None)

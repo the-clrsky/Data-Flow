@@ -23,3 +23,7 @@ data-flow.db
 .idea/
 .vscode/
 .DS_Store
+
+# Backups and leftovers of Import (they hold passwords too)
+*.db.bak-*
+.import-*.tmp

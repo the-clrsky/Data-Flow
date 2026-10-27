@@ -11,17 +11,37 @@
   <header>
     <div class="header-top">
       <h1><img src="/static/favicon.ico" alt="" class="brand-icon" />Data&nbsp;Flow <span class="subtitle">Oracle &rarr; PostgreSQL migration</span></h1>
-      <a href="https://github.com/the-clrsky/data-flow" target="_blank" rel="noopener noreferrer" class="github-link" aria-label="View on GitHub">
-        <img src="/static/GitHub.svg" alt="GitHub" class="github-icon" />
-      </a>
+      <div class="header-right">
+        <!-- the active set: every tab works on its Oracle/Postgres pair -->
+        <button id="set_btn" class="secondary" popovertarget="set_menu"
+                title="Active set - every tab works on this Oracle/Postgres pair">
+          <span id="set_dot" class="set-dot"></span><span id="set_name">&hellip;</span> &#9662;
+        </button>
+        <div id="set_menu" popover>
+          <div id="set_list"></div>
+          <hr />
+          <button id="set_new">+ New set&hellip;</button>
+          <hr />
+          <!-- the same as the buttons on the Connections tab's set card -->
+          <button data-same="set_export_one">Export this set</button>
+          <button data-same="set_export_some">Export sets&hellip;</button>
+          <button data-same="set_export_all">Export all</button>
+          <button data-same="set_import">Import&hellip;</button>
+        </div>
+        <input id="import_file" type="file" accept=".db" hidden />
+        <a href="https://github.com/the-clrsky/data-flow" target="_blank" rel="noopener noreferrer" class="github-link" aria-label="View on GitHub">
+          <img src="/static/GitHub.svg" alt="GitHub" class="github-icon" />
+        </a>
+      </div>
     </div>
     <nav>
       <button class="tab active" data-tab="connections">1 · Connections</button>
       <button class="tab" data-tab="tables">2 · Tables</button>
       <button class="tab" data-tab="groups">3 · Groups</button>
-      <button class="tab" data-tab="columns">4 · Mappings</button>
-      <button class="tab" data-tab="migrate">5 · Migrate &amp; Sync</button>
-      <button class="tab" data-tab="history">6 · History</button>
+      <button class="tab" data-tab="dictionaries">4 · Dictionaries</button>
+      <button class="tab" data-tab="columns">5 · Mappings</button>
+      <button class="tab" data-tab="migrate">6 · Migrate &amp; Sync</button>
+      <button class="tab" data-tab="history">7 · History</button>
     </nav>
   </header>
 
@@ -31,8 +51,25 @@
       <div id="first_run" class="row" hidden>
         <span class="status">Set up Data Flow before, on this or another PC? Load those settings instead of typing them again:</span>
         <button id="first_run_import" class="secondary"
-                title="A .db file from History → Export all data, or the data-flow.db of an older copy">Import saved settings…</button>
+                title="A .db file from Export on the Connections tab, or the data-flow.db of an older copy">Import saved settings…</button>
         <span id="first_run_status" class="status"></span>
+      </div>
+      <div class="card set-card">
+        <div class="row">
+          <label>Set name <input id="set_edit_name" autocomplete="off" /></label>
+          <label>Colour <input id="set_edit_color" type="color" /></label>
+          <button id="set_save">Save</button>
+          <button id="set_save_as" class="secondary"
+                  title="A new set with this set's saved Oracle and Postgres connections. Tables, groups, dictionaries and mappings start empty.">Save as new set&hellip;</button>
+          <button id="set_delete" class="danger">Delete set</button>
+          <span id="set_status" class="status"></span>
+          <div class="set-io">
+            <button id="set_export_one" class="secondary">Export this set</button>
+            <button id="set_export_some" class="secondary">Export sets&hellip;</button>
+            <button id="set_export_all" class="secondary">Export all</button>
+            <button id="set_import" class="secondary">Import&hellip;</button>
+          </div>
+        </div>
       </div>
       <div class="cols">
         <div class="card">
@@ -141,9 +178,65 @@
       </div>
     </section>
 
+    <!-- ===== Dictionaries ===== -->
+    <section id="dictionaries" class="panel">
+      <div class="cols" style="grid-template-columns: minmax(0, 1fr) 360px;">
+        <div class="card">
+          <div class="row">
+            <h2>Dictionaries &amp; lookups</h2>
+            <span id="dict_count" class="status"></span>
+            <button id="dict_import_btn" class="secondary btn-sm" hidden>Import from another set&hellip;</button>
+          </div>
+          <input id="dict_search" placeholder="Search by name, Oracle column, Postgres column or table…" autocomplete="off" />
+          <h3>Dictionaries</h3>
+          <div id="dict_list" class="dict-grid"></div>
+          <h3>Postgres lookups</h3>
+          <div id="lk_list" class="dict-grid"></div>
+        </div>
+
+        <!-- the forms move to the Mappings tab's Dictionaries column while that tab is open -->
+        <div class="card" id="dict_forms_home">
+          <div id="dict_forms">
+          <h3>Add or update a dictionary</h3>
+          <p class="status">Old &rarr; new value tables (e.g. user IDs). Pick one per column on the Mappings tab; every non-null value is swapped through it.
+            A row whose value isn't in the dictionary is skipped and logged.
+            Excel or CSV with header <code>oracle,postgres</code> &middot;
+            <a class="link" href="data:text/csv;charset=utf-8,oracle%2Cpostgres%0D%0A" download="dictionary_template.csv">template</a></p>
+          <label>Name <input id="dict_name" placeholder="e.g. USER_ID - or click a dictionary to update it" autocomplete="off" /></label>
+          <label>File <input id="dict_file" type="file" accept=".xlsx,.xlsm,.csv,.txt" /></label>
+          <label class="checkbox-label"><input id="dict_replace" type="checkbox" style="width: auto" />
+            Replace all entries (otherwise add new and update changed)</label>
+          <div class="row">
+            <button id="dict_upload">Upload</button>
+          </div>
+          <label>Or add / update / delete a few rows
+            <textarea id="dict_rows" rows="3" placeholder="OLD858,U7895 - one per line, or paste two columns from Excel. To delete, the old IDs alone are enough."></textarea></label>
+          <div class="row">
+            <button id="dict_add_rows" class="secondary">Add rows</button>
+            <button id="dict_delete_rows" class="danger">Delete rows</button>
+            <span id="dict_status" class="status"></span>
+          </div>
+
+          <h3>Add or edit a Postgres lookup</h3>
+          <p class="status">Take the value from a table already in Postgres, e.g. the <code>id</code> of the customer whose <code>code</code> is the Oracle value.
+            Pick it in a column's Dictionary list on the Mappings tab, like a dictionary. Matching on several columns (<code>code, branch</code>)? Name the other Oracle columns on that row, in the same order.
+            The table loads first when it's in the same sync. A row with no match is skipped and logged.</p>
+          <label>Name <input id="lk_name" placeholder="e.g. CUSTOMER_ID - or click a lookup to edit it" autocomplete="off" /></label>
+          <label>Postgres table <input id="lk_table" placeholder="customers" autocomplete="off" /></label>
+          <label>Match on column(s) <input id="lk_match" placeholder="code, branch" autocomplete="off" /></label>
+          <label>Take the value of column <input id="lk_value" placeholder="id" autocomplete="off" /></label>
+          <div class="row">
+            <button id="lk_save">Save lookup</button>
+            <span id="lk_status" class="status"></span>
+          </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== Columns ===== -->
     <section id="columns" class="panel">
-      <div class="cols" style="grid-template-columns: 280px minmax(0, 1fr) 320px;">
+      <div class="cols">
         <div class="card">
           <h2>Selected tables</h2>
           <div class="row">
@@ -173,12 +266,15 @@
             Upsert / insert only: never empty the table - insert new rows and update changed ones on a mapped primary/unique key, or with no such key just insert, skipping rows that clash (for tables other tables reference)
           </label>
           <p id="col_filled_note" class="status"></p>
+          <!-- scrolls sideways on narrow screens instead of running under the Dictionaries column -->
+          <div class="grid-scroll">
           <table id="col_grid" class="grid">
             <thead>
               <tr><th>Oracle column</th><th>Oracle type</th><th>Target name</th><th>Postgres type</th><th title="Every non-null value is replaced by its entry in this dictionary, or looked up in Postgres">Dictionary</th><th title="Loaded instead of NULL when the Oracle value is empty">If null, use</th><th><label class="checkbox-label" style="margin:0"><input id="col_use_all" type="checkbox" title="Use all / none" /> Use</label></th></tr>
             </thead>
             <tbody></tbody>
           </table>
+          </div>
           <div id="col_pg_only"></div>
           <div class="row">
             <button id="col_save" disabled>Save mapping</button>
@@ -186,41 +282,16 @@
           </div>
         </div>
 
-        <div class="card">
-          <h2>Dictionaries</h2>
-          <p class="status">Old &rarr; new value tables (e.g. user IDs). Pick one per column in the grid; every non-null value is swapped through it.
-            A row whose value isn't in the dictionary is skipped and logged.
-            Excel or CSV with header <code>oracle,postgres</code> &middot;
-            <a class="link" href="data:text/csv;charset=utf-8,oracle%2Cpostgres%0D%0A" download="dictionary_template.csv">template</a></p>
-          <label>Name <input id="dict_name" placeholder="e.g. USER_ID - pick one below to update it" autocomplete="off" /></label>
-          <label>File <input id="dict_file" type="file" accept=".xlsx,.xlsm,.csv,.txt" /></label>
-          <label class="checkbox-label"><input id="dict_replace" type="checkbox" style="width: auto" />
-            Replace all entries (otherwise add new and update changed)</label>
+        <!-- the open table's dictionaries; the add forms join this card on this tab -->
+        <div class="card" id="col_dicts">
           <div class="row">
-            <button id="dict_upload">Upload</button>
+            <h2>Dictionaries</h2>
+            <button id="col_dicts_toggle" class="secondary btn-sm" title="Hide the Dictionaries column">Hide</button>
           </div>
-          <label>Or add / update / delete a few rows
-            <textarea id="dict_rows" rows="3" placeholder="OLD858,U7895 - one per line, or paste two columns from Excel. To delete, the old IDs alone are enough."></textarea></label>
-          <div class="row">
-            <button id="dict_add_rows" class="secondary">Add rows</button>
-            <button id="dict_delete_rows" class="danger">Delete rows</button>
-            <span id="dict_status" class="status"></span>
+          <div id="col_dicts_body">
+            <p id="col_dicts_note" class="status">Pick a table to see the dictionaries it uses.</p>
+            <div id="col_dict_list" class="mapping-list"></div>
           </div>
-          <div id="dict_list" class="mapping-list"></div>
-
-          <h3>Postgres lookups</h3>
-          <p class="status">Take the value from a table already in Postgres, e.g. the <code>id</code> of the customer whose <code>code</code> is the Oracle value.
-            Pick it in a column's Dictionary list like a dictionary. Matching on several columns (<code>code, branch</code>)? Name the other Oracle columns on that row, in the same order.
-            The table loads first when it's in the same sync. A row with no match is skipped and logged.</p>
-          <label>Name <input id="lk_name" placeholder="e.g. CUSTOMER_ID - pick one below to edit it" autocomplete="off" /></label>
-          <label>Postgres table <input id="lk_table" placeholder="customers" autocomplete="off" /></label>
-          <label>Match on column(s) <input id="lk_match" placeholder="code, branch" autocomplete="off" /></label>
-          <label>Take the value of column <input id="lk_value" placeholder="id" autocomplete="off" /></label>
-          <div class="row">
-            <button id="lk_save">Save lookup</button>
-            <span id="lk_status" class="status"></span>
-          </div>
-          <div id="lk_list" class="mapping-list"></div>
         </div>
       </div>
     </section>
@@ -252,11 +323,6 @@
     <section id="history" class="panel">
       <div class="row">
         <button id="history_refresh" class="secondary">Refresh</button>
-        <a href="/api/export" class="link" download
-           title="Connections (with passwords), mappings, groups and sync history in one file">Export all data</a>
-        <button id="import_btn" class="secondary"
-                title="Replace connections, mappings, groups and history with a file from Export all data (e.g. from another installation)">Import data…</button>
-        <input id="import_file" type="file" accept=".db" hidden />
         <span id="history_status" class="status"></span>
       </div>
       <table id="history_table" class="grid">
@@ -284,6 +350,55 @@
         <thead><tr><th>Oracle value</th><th>Postgres value</th></tr></thead>
         <tbody id="dict_view_rows"></tbody>
       </table>
+    </div>
+    <form id="dict_view_add" class="row" title="An Oracle value already in the dictionary gets the new Postgres value">
+      <input id="dict_view_old" placeholder="Oracle value" autocomplete="off" required />
+      <input id="dict_view_new" placeholder="Postgres value" autocomplete="off" required />
+      <button type="submit">Add</button>
+    </form>
+    <p id="dict_view_status" class="status"></p>
+  </dialog>
+
+  <!-- Export this set / sets / all, from the set menu -->
+  <dialog id="export_dlg" aria-labelledby="export_title">
+    <h2 id="export_title">Export sets</h2>
+    <p class="status">Each set goes with its connections, tables, groups, dictionaries, mappings and sync history.</p>
+    <div id="export_sets" class="tablelist"></div>
+    <label class="checkbox-label"><input id="export_passwords" type="checkbox" />
+      Include passwords (anyone with the file can then connect)</label>
+    <div class="row">
+      <button id="export_go">Download</button>
+      <button id="export_cancel" class="secondary">Cancel</button>
+      <span id="export_status" class="status"></span>
+    </div>
+  </dialog>
+
+  <!-- a file picked with Import… (or Import saved settings…) -->
+  <dialog id="import_dlg" aria-labelledby="import_title">
+    <h2 id="import_title"></h2>
+    <p class="status">Tick the sets to add next to yours.</p>
+    <div id="import_sets" class="tablelist"></div>
+    <label id="import_overwrite_row" class="checkbox-label"><input id="import_overwrite" type="checkbox" />
+      Overwrite a set here with the same name (otherwise it comes in as &ldquo;Name (2)&rdquo;)</label>
+    <div class="row">
+      <button id="import_add">Add sets</button>
+      <button id="import_replace" class="danger"
+              title="Every set here is replaced by the file's">Replace everything&hellip;</button>
+      <button id="import_cancel" class="secondary">Cancel</button>
+      <span id="import_status" class="status"></span>
+    </div>
+  </dialog>
+
+  <!-- Dictionaries tab: copy dictionaries from another set into this one -->
+  <dialog id="dict_import" aria-labelledby="dict_import_title">
+    <h2 id="dict_import_title">Import dictionaries from another set</h2>
+    <label>Set <select id="dict_import_set" style="display: block; width: 100%;"></select></label>
+    <label class="checkbox-label"><input id="dict_import_all" type="checkbox" /> Select all</label>
+    <div id="dict_import_list" class="tablelist"></div>
+    <div class="row">
+      <button id="dict_import_go">Import selected</button>
+      <button id="dict_import_close" class="secondary">Close</button>
+      <span id="dict_import_status" class="status"></span>
     </div>
   </dialog>
 

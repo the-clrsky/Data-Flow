@@ -258,7 +258,7 @@ def join_plan(group, per_source):
     Name collisions are suffixed with the source table, because joined
     tables routinely share column names (NAME, CREATED_AT, STATUS) and the
     target needs one column for each. The suffix shows up in the dry-run
-    DDL, and a per-column rename on the Columns tab overrides it.
+    DDL, and a per-column rename on the Mappings tab overrides it.
     """
     nullable_sources = _nullable_sources(group)
     taken = set()
@@ -323,7 +323,7 @@ def split_plan(group, resolved, pk):
     by_name = {c["name"]: c for c in reversed(resolved)}  # first destination wins
     skipped_pk = [k for k in pk if by_name.get(k, {}).get("skip")]
     if skipped_pk:
-        errors.append("primary key columns are skipped on the Columns tab: " + ", ".join(skipped_pk))
+        errors.append("primary key columns are skipped on the Mappings tab: " + ", ".join(skipped_pk))
     parts = []
     for p in group["parts"]:
         unknown = [c for c in p["columns"] if c not in by_name]

@@ -19,6 +19,7 @@ from . import engine
 from . import history
 from . import groups
 from . import mapping
+from . import sets as set_store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 app = FastAPI(title="Data Flow")
@@ -109,6 +110,71 @@ def _mask(cfg):
     if c.get("password"):
         c["password"] = "********"
     return c
+
+
+# ---------- sets ----------
+_syncing = 0  # syncs streaming now; the active set can't change under one
+
+
+def _busy():
+    if _syncing:
+        return JSONResponse({"error": "A sync is running - wait for it to finish (or stop it) first."},
+                            status_code=409)
+
+
+class SetSpec(BaseModel):
+    name: str
+    color: str | None = None
+    copy_connections: bool = False
+
+
+def _set_call(fn, *args):
+    try:
+        return {"ok": True, "result": fn(*args)}
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/sets")
+def list_sets():
+    return {"sets": set_store.all_sets(), "active": store.active()}
+
+
+@app.post("/api/sets")
+def create_set(spec: SetSpec):
+    return _set_call(set_store.create, spec.name, spec.color, spec.copy_connections)
+
+
+@app.put("/api/sets/{set_id}")
+def update_set(set_id: int, spec: SetSpec):
+    return _set_call(set_store.update, set_id, spec.name, spec.color)
+
+
+@app.post("/api/sets/{set_id}/activate")
+def activate_set(set_id: int):
+    return _busy() or _set_call(set_store.activate, set_id)
+
+
+@app.delete("/api/sets/{set_id}")
+def delete_set(set_id: int):
+    return _busy() or _set_call(set_store.delete, set_id)
+
+
+@app.get("/api/sets/{set_id}/dictionaries")
+def set_dictionaries(set_id: int):
+    """Another set's dictionaries, to import some into the active one."""
+    d = store.get("dictionaries", {}, set_id=set_id)
+    return {"dictionaries": [dict(name=n, entries=len(v)) for n, v in sorted(d.items())]}
+
+
+class DictionaryImport(BaseModel):
+    set_id: int
+    names: list[str]
+
+
+@app.post("/api/dictionaries/import")
+def import_dictionaries(spec: DictionaryImport):
+    return _set_call(mapping.import_dictionaries, spec.set_id, spec.names)
 
 
 # ---------- config ----------
@@ -269,7 +335,8 @@ def mappings_status(tables: str = ""):
 @app.get("/api/dictionaries")
 def list_dictionaries():
     return {"dictionaries": [dict(name=n, entries=len(d)) for n, d in sorted(mapping.dictionaries().items())],
-            "lookups": mapping.lookups()}
+            "lookups": mapping.lookups(),
+            "used_by": mapping.dictionary_users()}
 
 
 @app.get("/api/dictionaries/{name}")
@@ -403,11 +470,15 @@ def sync(tables: str = "", fresh: str = ""):
     fresh_tables = {t for t in fresh.split(",") if t}
 
     def event_stream():
+        global _syncing
+        _syncing += 1
         try:
             for ev in engine.sync_stream(names, fresh_tables=fresh_tables):
                 yield f"data: {json.dumps(ev, default=_json_default)}\n\n"
         except Exception as e:  # noqa: BLE001
             yield f"data: {json.dumps({'type': 'fatal', 'error': str(e)})}\n\n"
+        finally:
+            _syncing -= 1
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -467,63 +538,48 @@ def sync_run_export(run_id: int):
     return PlainTextResponse(body, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-# ---------- export ----------
+# ---------- export / import ----------
 @app.get("/api/export")
-def export_all():
-    """All user data - connections (passwords included), selection,
-    mappings, groups, sync history, row errors, checkpoints - as one
-    consistent copy of the SQLite store. Restore by putting it back as
-    data-flow.db while the app is stopped."""
-    c = sqlite3.connect(store.DB_PATH)
+def export_sets(sets: str = "", passwords: bool = True):
+    """Sets (all of them when none are named) with their connections,
+    mappings, groups, dictionaries and sync history, as one .db file."""
+    ids = [int(i) for i in sets.split(",") if i] or [s["id"] for s in set_store.all_sets()]
     try:
-        data = c.serialize()
-    finally:
-        c.close()
-    filename = f"data-flow-{datetime.now():%Y%m%d-%H%M%S}.db"
+        data = set_store.export(ids, passwords)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     return Response(data, media_type="application/vnd.sqlite3",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
-
-
-def _copy_db(source, dest_path):
-    """Overwrite the database at dest_path with `source` (SQLite backup API:
-    safe while the app has the destination open)."""
-    d = sqlite3.connect(dest_path)
-    try:
-        source.backup(d)
-    finally:
-        d.close()
+                    headers={"Content-Disposition": f'attachment; filename="{set_store.export_filename(ids)}"'})
 
 
 @app.post("/api/import")
-async def import_all(request: Request):
-    """Replace everything this installation stores with a file made by
-    "Export all data" (the request body is the file). The current store is
-    first copied to <db>.bak-<timestamp>, so a wrong import can be undone by
-    hand. Don't import while a sync is running."""
+async def import_sets(request: Request, mode: str = "inspect", sets: str = "", overwrite: bool = False):
+    """The request body is a file from Export. mode=inspect lists its sets;
+    mode=add adds sets `sets` of it next to the ones here (a set of the same
+    name is overwritten, or with overwrite=false comes in renamed); mode=replace
+    swaps everything here for it. Adding or replacing first copies the
+    current store to <db>.bak-<timestamp>, so a wrong import can be undone by hand."""
+    if mode != "inspect" and (busy := _busy()):
+        return busy
     tmp = os.path.join(os.path.dirname(os.path.abspath(store.DB_PATH)),
-                       f".import-{datetime.now():%Y%m%d%H%M%S}.tmp")
+                       f".import-{datetime.now():%Y%m%d%H%M%S%f}.tmp")
     try:
         with open(tmp, "wb") as f:
             f.write(await request.body())
-        src = sqlite3.connect(tmp)
-        try:
-            src.execute("SELECT key, value FROM settings LIMIT 1")  # an export always has this
-            if src.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise sqlite3.DatabaseError("file is damaged")
-            store.get("selection")  # makes sure the live store exists before it is backed up
-            backup = f"{store.DB_PATH}.bak-{datetime.now():%Y%m%d-%H%M%S}"
-            live = sqlite3.connect(store.DB_PATH)
-            try:
-                _copy_db(live, backup)
-            finally:
-                live.close()
-            _copy_db(src, store.DB_PATH)
-        finally:
-            src.close()
-        return {"ok": True, "backup": os.path.basename(backup)}
+        set_store.check_file(tmp)
+        if mode == "inspect":
+            return {"sets": set_store.file_sets(tmp)}
+        backup = set_store.backup()
+        if mode == "replace":
+            set_store.replace_store(tmp, store.DB_PATH)
+            return {"ok": True, "backup": backup}
+        added = set_store.add_from(tmp, [int(i) for i in sets.split(",") if i], overwrite)
+        return {"ok": True, "added": added, "backup": backup}
     except sqlite3.DatabaseError:
-        return JSONResponse({"error": "That is not a Data Flow export (.db file from \"Export all data\")."},
+        return JSONResponse({"error": "That is not a Data Flow export (.db file from Export)."},
                             status_code=400)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
