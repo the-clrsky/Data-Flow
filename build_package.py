@@ -5,10 +5,12 @@ for people who don't have Python. They unzip it and double-click
 The bundled Python is the Windows "embeddable" build of the version running
 this script, so the dependencies pip installs here are the right ones for it.
 
-    .venv\\Scripts\\python.exe build_package.py
+    .venv\\Scripts\\python.exe build_package.py [--with-docs]
 
 Settings (data-flow.db) are never packed: they hold connection passwords.
 Each copy keeps its own next to "Data Flow.bat"; see READ-ME-FIRST.txt.
+docs/ is left out unless --with-docs: the guides there name internal
+systems, and a release zip may be published.
 """
 import os
 import platform
@@ -71,9 +73,8 @@ OTHER PORT / OTHER PCs ON THE NETWORK
   Port: before starting, run  set DATAFLOW_PORT=8080  in a command prompt in
   this folder, then  "Data Flow.bat"  from the same prompt.
   Other PCs can open http://<this-pc-name-or-ip>:8000 while it runs.
-
-Instructions for Postgres lookups: docs\\Postgres_Lookups_Instructions.docx
 """
+DOCS_NOTE = "\nInstructions for Postgres lookups: docs\\Postgres_Lookups_Instructions.docx\n"
 
 
 def run(*args):
@@ -108,14 +109,12 @@ def main():
     # 3. launcher and instructions
     with open(os.path.join(STAGE, "Data Flow.bat"), "w", newline="\r\n") as f:
         f.write(LAUNCHER)
+    with_docs = "--with-docs" in sys.argv
     with open(os.path.join(STAGE, "READ-ME-FIRST.txt"), "w", newline="\r\n", encoding="utf-8") as f:
-        f.write(README)
-    for doc in ("LICENSE", "docs"):
-        src = os.path.join(ROOT, doc)
-        if os.path.isdir(src):
-            shutil.copytree(src, os.path.join(STAGE, doc))
-        elif os.path.exists(src):
-            shutil.copy(src, STAGE)
+        f.write(README + (DOCS_NOTE if with_docs else ""))
+    shutil.copy(os.path.join(ROOT, "LICENSE"), STAGE)
+    if with_docs:
+        shutil.copytree(os.path.join(ROOT, "docs"), os.path.join(STAGE, "docs"))
 
     # nobody's settings or passwords go out in the zip
     leaked = [os.path.join(d, f) for d, _, fs in os.walk(STAGE) for f in fs

@@ -43,7 +43,8 @@ Environment overrides: `DATAFLOW_HOST`, `DATAFLOW_PORT`, `DATAFLOW_DB`
 Builds `dist\data-flow-<version>-windows.zip` (~32 MB): the app plus its own
 Python, so the people you send it to need neither Python nor internet. They
 unzip it and double-click `Data Flow.bat`; `READ-ME-FIRST.txt` inside explains
-the rest. The zip never contains a `data-flow.db` (it holds passwords). To bring
+the rest. `docs/` is only packed with `--with-docs` (its guides name internal
+systems). The zip never contains a `data-flow.db` (it holds passwords). To bring
 saved settings along, use History → **Export all data** on the old copy and
 **Import saved settings…** on the new one's Connections tab, or copy the old
 `data-flow.db` into the new folder before starting it.

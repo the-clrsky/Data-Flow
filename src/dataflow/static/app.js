@@ -220,9 +220,12 @@ async function loadDictionaries() {
       className: "link", textContent: "Download",
       href: "/api/dictionaries/" + encodeURIComponent(d.name) + "/export",
     });
+    const view = Object.assign(document.createElement("button"), { className: "secondary", textContent: "View" });
+    view.onclick = () => openDictView(d.name);
+    // the name gets its own line: the card is too narrow for it and three controls
     item.append(Object.assign(document.createElement("span"), {
-      className: "mapping-item-name", textContent: `${d.name} (${d.entries} entries)`, style: "flex: 1",
-    }), csv, del);
+      className: "mapping-item-name", textContent: `${d.name} (${d.entries} entries)`, style: "flex: 1 1 100%",
+    }), view, csv, del);
     // pick to update: uploads and pasted rows go to the name in the box
     item.onclick = (e) => { if (e.target === item || e.target.tagName === "SPAN") $("dict_name").value = d.name; };
     return item;
@@ -241,6 +244,40 @@ async function sendDictRows(body, filename, replace) {
   loadDictionaries();
   return true;
 }
+
+// ---------- dictionary viewer (popup) ----------
+const DICT_VIEW_MAX = 500;  // rows drawn at once; search narrows the rest
+let dictViewEntries = [];
+
+async function openDictView(name) {
+  const r = await api("/api/dictionaries/" + encodeURIComponent(name));
+  if (r.error) return setStatus($("dict_status"), r.error, false);
+  dictViewEntries = r.entries;
+  $("dict_view_title").textContent = `${name} (${fmt(r.entries.length)} entries)`;
+  $("dict_view_search").value = "";
+  renderDictView();
+  $("dict_view").showModal();
+  $("dict_view_search").focus();
+}
+
+function renderDictView() {
+  const f = $("dict_view_search").value.trim().toLowerCase();
+  const hits = f ? dictViewEntries.filter(([o, p]) => o.toLowerCase().includes(f) || p.toLowerCase().includes(f))
+                 : dictViewEntries;
+  $("dict_view_rows").replaceChildren(...hits.slice(0, DICT_VIEW_MAX).map(([o, p]) => {
+    const tr = document.createElement("tr");
+    tr.append(...[o, p].map((v) => Object.assign(document.createElement("td"), { textContent: v })));
+    return tr;
+  }));
+  $("dict_view_count").textContent = hits.length > DICT_VIEW_MAX
+    ? `Showing the first ${fmt(DICT_VIEW_MAX)} of ${fmt(hits.length)}${f ? " matches" : ""} - search to narrow it down.`
+    : f ? `${fmt(hits.length)} match${hits.length === 1 ? "" : "es"}` : "";
+}
+
+$("dict_view_search").oninput = renderDictView;
+$("dict_view_close").onclick = () => $("dict_view").close();
+// a click on the dimmed backdrop lands on the dialog itself
+$("dict_view").onclick = (e) => { if (e.target === $("dict_view")) $("dict_view").close(); };
 
 $("lk_save").onclick = async () => {
   const name = $("lk_name").value.trim();
@@ -341,11 +378,54 @@ async function loadMappingSummary() {
   });
 }
 
-function renderColumnGrid(cols) {
+function renderColumnGrid(cols, constants = []) {
   const tb = $("col_grid").querySelector("tbody");
   tb.innerHTML = "";
-  cols.forEach((c) => tb.appendChild(columnRow(c)));
+  cols.filter((c) => !c.pg_only).forEach((c) => tb.appendChild(columnRow(c)));
+  // Postgres-only rows go last: their Oracle-column list is read from the rows above
+  cols.filter((c) => c.pg_only).forEach((c) => tb.appendChild(pgOnlyRow(c)));
+  constants.forEach((k) => tb.appendChild(pgOnlyRow({ name: "", target: k.target, if_null: k.value })));
   syncUseAll();
+}
+
+// A column of the existing table that no Oracle column feeds, added with
+// "Add to Sync": a fixed value, or a dictionary / lookup applied to the value
+// of the Oracle column picked here (saved as one more destination of it).
+function pgOnlyRow(p) {
+  const tr = columnRow({ name: p.name || "", target: p.target, skip: false, nullable: true,
+                         dictionary: p.dictionary, lookup_with: p.lookup_with, if_null: p.if_null });
+  tr.classList.add("col-pgonly");
+  tr.dataset.col = "";
+  const [tdName, tdType, , tdPgType, , , tdUse] = tr.children;
+  const target = tr.querySelector(".col-target");
+  const dict = tr.querySelector(".col-dict");
+  const fill = tr.querySelector(".col-ifnull");
+
+  const key = document.createElement("select");
+  key.className = "col-pgkey";
+  const oracleCols = [...new Set([...document.querySelectorAll("#col_grid tbody tr:not(.col-pgonly)")]
+    .map((r) => r.dataset.col))];
+  key.replaceChildren(new Option("Fixed value", ""), ...oracleCols.map((n) => new Option(`Look up ${n}`, n)));
+  key.value = p.name || "";
+  key.title = "Fixed value: the same value in every row. Look up: the dictionary or lookup is applied to this Oracle column's value";
+  key.onchange = () => {
+    target.dataset.name = key.value;
+    dict.disabled = !key.value;
+    if (!key.value) { dict.value = ""; dict.onchange(); }
+    fill.placeholder = key.value ? "if that's empty" : "value";
+    fill.title = key.value ? "Loaded when the Oracle value is empty" : "Loaded into every row";
+  };
+  key.onchange();
+
+  const remove = Object.assign(document.createElement("button"), { type: "button", textContent: "×",
+                                                                    title: "Don't fill this column" });
+  remove.onclick = () => { tr.remove(); checkTargets(); };
+  tdName.replaceChildren(Object.assign(document.createElement("span"), { className: "pgonly-label",
+                                                                         textContent: "Postgres only " }), remove, key);
+  tdType.textContent = "—";
+  tdPgType.querySelector(".col-pgtype").hidden = true;  // the column exists: its type is the table's
+  tdUse.querySelector(".col-use").hidden = true;  // always used; × removes it
+  return tr;
 }
 
 let filledCols = new Set();  // Oracle columns of the open table that hold data
@@ -360,7 +440,7 @@ async function loadFilled(table) {
   filledCols = new Set(r.filled);
   document.querySelectorAll("#col_grid tbody tr").forEach((tr) =>
     tr.firstElementChild.classList.toggle("has-data", filledCols.has(tr.dataset.col)));
-  setStatus(note, `${filledCols.size} of ${new Set([...document.querySelectorAll("#col_grid tbody tr")].map((tr) => tr.dataset.col)).size} columns have data (highlighted).`);
+  setStatus(note, `${filledCols.size} of ${new Set([...document.querySelectorAll("#col_grid tbody tr:not(.col-pgonly)")].map((tr) => tr.dataset.col)).size} columns have data (highlighted).`);
 }
 
 function columnRow(c) {
@@ -484,14 +564,14 @@ function columnRow(c) {
 
 // header checkbox: ticked when every column is used, dashed when some are
 function syncUseAll() {
-  const boxes = [...document.querySelectorAll("#col_grid .col-use")];
+  const boxes = [...document.querySelectorAll("#col_grid tr:not(.col-pgonly) .col-use")];
   const on = boxes.filter((b) => b.checked).length;
   $("col_use_all").checked = boxes.length > 0 && on === boxes.length;
   $("col_use_all").indeterminate = on > 0 && on < boxes.length;
 }
 
 $("col_use_all").onchange = () => {
-  document.querySelectorAll("#col_grid .col-use").forEach((b) => {
+  document.querySelectorAll("#col_grid tr:not(.col-pgonly) .col-use").forEach((b) => {
     b.checked = $("col_use_all").checked;
     b.onchange();
   });
@@ -532,7 +612,7 @@ async function loadColumns(table) {
   // (until it's saved, a sync still takes every column)
   filledCols = new Set();
   loadFilled(table);  // not awaited: it scans the table
-  renderColumnGrid(r.saved ? r.columns : r.columns.map((c) => ({ ...c, skip: true })));
+  renderColumnGrid(r.saved ? r.columns : r.columns.map((c) => ({ ...c, skip: true })), r.constants || []);
   setStatus($("columns_status"),
     r.saved ? "" : "Not saved yet: tick the columns you need, then Save. Until then a sync takes every column.", null);
   await loadPgTables(true);  // fresh each time: the Postgres connection may have changed
@@ -677,13 +757,25 @@ function renderPgOnly(mapped) {
   const blocking = rest.filter((c) => c.not_null && !c.has_default);
   box.innerHTML =
     `<h3>Postgres-only columns (${rest.length}) — not filled from Oracle</h3>` +
-    (blocking.length ? `<p class="status err">${blocking.length} are NOT NULL with no default — the sync will fail unless an Oracle column maps to them.</p>` : "") +
-    '<table class="grid"><thead><tr><th>Postgres column</th><th>Type</th><th>Gets</th></tr></thead><tbody>' +
+    (blocking.length ? `<p class="status err">${blocking.length} are NOT NULL with no default — the sync will fail unless an Oracle column maps to them or you add them to the sync.</p>` : "") +
+    '<table class="grid"><thead><tr><th>Postgres column</th><th>Type</th><th>Gets</th><th></th></tr></thead><tbody>' +
     rest.map((c) => {
       const gets = c.has_default ? "its default" : c.not_null ? '<span class="mismatch">nothing — NOT NULL</span>' : "NULL";
-      return `<tr><td>${c.name}</td><td>${c.type}</td><td>${gets}</td></tr>`;
+      return `<tr><td>${c.name}</td><td>${c.type}</td><td>${gets}</td>` +
+        `<td><button type="button" class="secondary" data-add="${c.name}" title="Fill it with a fixed value, or a dictionary / lookup on an Oracle column">Add to Sync</button></td></tr>`;
     }).join("") + "</tbody></table>";
 }
+
+// "Add to Sync": the column moves into the grid as a Postgres-only row
+$("col_pg_only").onclick = (e) => {
+  const b = e.target.closest("button[data-add]");
+  if (!b) return;
+  const tr = pgOnlyRow({ name: "", target: b.dataset.add });
+  $("col_grid").querySelector("tbody").appendChild(tr);
+  fillPgColSelects();
+  checkTargets();
+  tr.querySelector(".col-pgkey").focus();
+};
 
 $("mapping_refresh").onclick = loadMappingSummary;
 
@@ -701,6 +793,7 @@ $("col_save").onclick = async () => {
     if_null: tr.querySelector(".col-ifnull").value || null,
     dictionary: tr.querySelector(".col-dict").value || null,
     lookup_with: tr.querySelector(".col-lkwith").hidden ? null : tr.querySelector(".col-lkwith").value.split(","),
+    pg_only: tr.classList.contains("col-pgonly"),
   }));
   const body = {
     pg_table: $("col_pg_table").value || null, columns,

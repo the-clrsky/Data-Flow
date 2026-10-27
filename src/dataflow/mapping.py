@@ -96,6 +96,7 @@ def get(table):
         "created_pg_table": m.get("created_pg_table"),
         "fast_load": bool(m.get("fast_load", False)),
         "upsert": bool(m.get("upsert", False)),
+        "constants": m.get("constants", []),
     }
 
 
@@ -111,8 +112,12 @@ def save(table, pg_table, columns, fast_load=False, upsert=False):
     all_m = _all()
     entry = all_m.get(table, {})
     entry["pg_table"] = (pg_table or "").strip() or None
-    col_map = {}
-    for c in columns:
+    col_map, constants = {}, []
+    # pg_only rows: a column of the existing target table no Oracle column
+    # feeds. With an Oracle key column it is one more destination of that
+    # column (through its dictionary / lookup), so it goes after the key's
+    # own row; without one it is a fixed value added to every row.
+    for c in sorted(columns, key=lambda c: bool(c.get("pg_only"))):
         target = (c.get("target") or "").strip() or None
         pg_type_override = (c.get("pg_type") or "").strip() or None
         # if_null: value loaded instead of an Oracle NULL. Postgres parses
@@ -127,12 +132,19 @@ def save(table, pg_table, columns, fast_load=False, upsert=False):
             # lookup_with: Oracle columns supplying a lookup's 2nd, 3rd... match values
             "lookup_with": [w for w in c.get("lookup_with") or [] if w] or None,
         }
+        if c.get("pg_only"):
+            if not c["name"]:
+                constants.append(dict(target=target, value=dest["if_null"]))
+                continue
+            dest["pg_only"] = True
         # an Oracle column listed again is one more destination for it
         if c["name"] in col_map:
             col_map[c["name"]].setdefault("copies", []).append(dest)
         else:
             col_map[c["name"]] = dest
     entry["columns"] = col_map
+    # fixed values: {target, value} loaded into every row. Not DDL - no drift.
+    entry["constants"] = constants
     entry["fast_load"] = bool(fast_load)
     # upsert: load by INSERT ... ON CONFLICT on the target's key instead of
     # emptying it first (see pg_client.upsert_chunk). Not DDL - no drift.
@@ -168,6 +180,7 @@ def resolve(table, oracle_columns):
                 if_null=d.get("if_null"),
                 dictionary=d.get("dictionary"),
                 lookup_with=d.get("lookup_with"),
+                pg_only=bool(d.get("pg_only")),
             ))
     pg_table = m["pg_table"] or default_table_name(table)
     return pg_table, resolved
@@ -404,14 +417,30 @@ def value_filler(kept, lookup_source=None):
     return fill
 
 
+def with_constants(fill, constants):
+    """`fill` (a value_filler result, or None) followed by appending each
+    constant's value to every row, in order - the caller lists their targets
+    after the kept columns'. Returns fill unchanged when there are none."""
+    if not constants:
+        return fill
+    fill = fill or (lambda rows: (rows, []))
+    values = tuple(k["value"] for k in constants)
+
+    def add(rows):
+        rows, rejects = fill(rows)
+        return [tuple(r) + values for r in rows], rejects
+    return add
+
+
 def fingerprint(pg_table, resolved_columns):
     """Hash of everything that affects DDL shape: target table + per-column
-    (oracle name, target name, skip, pg type) in Oracle column order."""
+    (oracle name, target name, skip, pg type) in Oracle column order.
+    pg_only rows fill columns the table already has, so they don't count."""
     payload = {
         "pg_table": pg_table,
         "columns": [
             {"name": c["name"], "target": c["target"], "skip": c["skip"], "pg_type": c["pg_type"]}
-            for c in resolved_columns
+            for c in resolved_columns if not c.get("pg_only")
         ],
     }
     blob = json.dumps(payload, sort_keys=True)

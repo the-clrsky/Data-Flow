@@ -56,6 +56,9 @@ class ColumnMapping(BaseModel):
     if_null: str | None = None
     dictionary: str | None = None
     lookup_with: list[str] | None = None
+    # a column of the existing target no Oracle column feeds: `name` is the
+    # Oracle column its dictionary/lookup reads, or "" for a fixed value (if_null)
+    pg_only: bool = False
 
 
 class JoinPair(BaseModel):
@@ -267,6 +270,15 @@ def mappings_status(tables: str = ""):
 def list_dictionaries():
     return {"dictionaries": [dict(name=n, entries=len(d)) for n, d in sorted(mapping.dictionaries().items())],
             "lookups": mapping.lookups()}
+
+
+@app.get("/api/dictionaries/{name}")
+def get_dictionary(name: str):
+    """A dictionary's entries as [oracle, postgres] pairs, in upload order."""
+    d = mapping.dictionaries().get(name)
+    if d is None:
+        return JSONResponse({"error": f"No dictionary named {name}."}, status_code=404)
+    return {"name": name, "entries": list(d.items())}
 
 
 @app.post("/api/dictionaries/{name}")

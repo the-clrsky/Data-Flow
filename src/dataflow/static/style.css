@@ -130,6 +130,11 @@ select {
 #col_grid input[type="checkbox"] { width: auto; display: inline; margin: 0; }
 #col_grid input.col-lkwith { padding: 5px 8px; font-size: 13px; }
 #col_grid input.col-lkwith[hidden] { display: none; }
+/* Postgres-only rows ("Add to Sync"): no Oracle source of their own */
+#col_grid input.col-use[hidden] { display: none; }
+#col_grid tr.col-pgonly td:first-child { border-left: 3px solid var(--accent); }
+#col_grid select.col-pgkey { display: block; width: 190px; margin-top: 6px; padding: 5px 8px; font-size: 13px; }
+.pgonly-label { color: var(--muted); font-size: 12px; text-transform: uppercase; }
 #col_grid input:disabled, #col_grid select:disabled { opacity: .4; }
 
 /* ---- schema drift banner ---- */
@@ -220,3 +225,12 @@ select {
 td.has-data { background: rgba(63,185,80,.15); box-shadow: inset 3px 0 0 var(--ok); font-weight: 600; }
 #import_file[hidden] { display: none; }  /* input { display: block } would otherwise win */
 #first_run[hidden] { display: none; }  /* likewise .row { display: flex } */
+
+/* dictionary viewer popup */
+#dict_view {
+  width: min(720px, 92vw); max-height: 85vh; padding: 18px;
+  background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+}
+#dict_view::backdrop { background: rgba(0, 0, 0, .6); }
+#dict_view .row { justify-content: space-between; margin-top: 0; }
+#dict_view .dict-view-scroll { max-height: 60vh; overflow-y: auto; }

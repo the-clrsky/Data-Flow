@@ -271,6 +271,22 @@
     </section>
   </main>
 
+  <!-- a dictionary's entries, opened by "View" in the Dictionaries card -->
+  <dialog id="dict_view" aria-labelledby="dict_view_title">
+    <div class="row">
+      <h2 id="dict_view_title"></h2>
+      <button id="dict_view_close" class="secondary">Close</button>
+    </div>
+    <input id="dict_view_search" placeholder="Search old or new values…" autocomplete="off" />
+    <p id="dict_view_count" class="status"></p>
+    <div class="dict-view-scroll">
+      <table class="grid">
+        <thead><tr><th>Oracle value</th><th>Postgres value</th></tr></thead>
+        <tbody id="dict_view_rows"></tbody>
+      </table>
+    </div>
+  </dialog>
+
   <footer class="app-footer">
     © 2026 Sadman Rahamat Bishal — <a href="https://sadmanbishal.com" target="_blank" rel="noopener noreferrer">sadmanbishal.com</a>
   </footer>

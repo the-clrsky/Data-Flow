@@ -195,9 +195,11 @@ def table_columns(table):
                      nullable=c["nullable"], target=c["target"], skip=c["skip"],
                      pg_type=c["pg_type"], pg_type_override=c["pg_type_override"],
                      default_pg_type=c["default_pg_type"], if_null=c["if_null"],
-                     dictionary=c["dictionary"], lookup_with=c["lookup_with"], copy=c["copy"])
+                     dictionary=c["dictionary"], lookup_with=c["lookup_with"], copy=c["copy"],
+                     pg_only=c["pg_only"])
                 for c in resolved
             ],
+            constants=mapping.get(table)["constants"],
         )
     finally:
         ocon.close()
@@ -231,20 +233,30 @@ def save_mapping(table, pg_table, columns, fast_load=False, upsert=False):
     if fast_load and upsert:
         return ("Upsert matches rows on the table's primary key, which the "
                 "drop/recreate-constraints option removes during the load - pick one.")
-    names = {c["name"].upper(): c["name"] for c in columns}
+    names = {c["name"].upper(): c["name"] for c in columns if c["name"] and not c.get("pg_only")}
     looks = mapping.lookups()
     for c in columns:
+        # a Postgres-only row is named by the column it fills
+        label = c.get("target") if c.get("pg_only") else c["name"]
+        if c.get("pg_only"):
+            if not (c.get("target") or "").strip():
+                return "A Postgres-only row has no Postgres column."
+            if not c["name"] and (c.get("dictionary") or c.get("if_null") in ("", None)):
+                return (f"{label}: give it a fixed value, or pick the Oracle column whose value "
+                        "the dictionary / lookup looks up.")
+            if c["name"] and c["name"].upper() not in names:
+                return f"{label}: no Oracle column {c['name']}."
         lk = looks.get(c.get("dictionary"))
         if c.get("skip") or not lk:
             c["lookup_with"] = None
             continue
         with_ = [w.strip() for w in c.get("lookup_with") or [] if w.strip()]
         if len(with_) != len(lk["match"]) - 1:
-            return (f'{c["name"]}: lookup "{c["dictionary"]}" matches on {", ".join(lk["match"])} - '
+            return (f'{label}: lookup "{c["dictionary"]}" matches on {", ".join(lk["match"])} - '
                     f'name {len(lk["match"]) - 1} other Oracle column(s) to match with, in that order.')
         unknown = [w for w in with_ if w.upper() not in names]
         if unknown:
-            return f'{c["name"]}: no Oracle column {", ".join(unknown)} to match with.'
+            return f'{label}: no Oracle column {", ".join(unknown)} to match with.'
         c["lookup_with"] = [names[w.upper()] for w in with_]
     mapping.save(table, pg_table, columns, fast_load, upsert)
     return None
@@ -863,7 +875,8 @@ def _table_unit(ocon, pcon, schema, owner, t, on_retry=None):
         raise RuntimeError("all columns skipped - nothing to load")
     oracle_cols, widen = mapping.fan_out([c["name"] for c in kept] + mapping.lookup_inputs(kept))
     order_cols = ora.get_order_columns(ocon, owner, mapping.oracle_table(t), on_retry=on_retry)
-    pg_cols = [c["target"] for c in kept]
+    consts = mapping.get(t)["constants"]  # fixed values, loaded after the kept columns
+    pg_cols = [c["target"] for c in kept] + [k["target"] for k in consts]
     def fetch(off, n, key):
         return ora.fetch_chunk(ocon, owner, mapping.oracle_table(t), oracle_cols,
                                order_cols, off, n, last_key=key, on_retry=on_retry)
@@ -887,7 +900,8 @@ def _table_unit(ocon, pcon, schema, owner, t, on_retry=None):
         drift_hint=f"Mapping for {t} has changed since it was created.",
         total=lambda: ora.row_count(ocon, owner, mapping.oracle_table(t), on_retry=on_retry),
         fetch=fetch,
-        transform=mapping.value_filler(kept, _lookup_source(pcon, schema, on_retry)),
+        transform=mapping.with_constants(
+            mapping.value_filler(kept, _lookup_source(pcon, schema, on_retry)), consts),
         after=mapping.lookup_tables(kept),
         reset=lambda: pg.truncate(pcon, schema, pgt, on_retry=on_retry),
         truncates=pgt,
