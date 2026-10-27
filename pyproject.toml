@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "data-flow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Selective Oracle to PostgreSQL table & data migration with a web GUI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,7 @@ dependencies = [
     "oracledb>=2.2",
     "psycopg[binary]>=3.1",
     "pydantic>=2",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

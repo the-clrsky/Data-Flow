@@ -2,7 +2,9 @@
 
 Selective **Oracle → PostgreSQL** table & data migration with a small web GUI.
 
-Pick a subset of Oracle tables, map/rename columns, create them in Postgres,
+Pick a subset of Oracle tables, map/rename columns, optionally combine
+several of them into one table (joined on keys, or stacked), create them in
+Postgres,
 compare row counts, and run a live, resumable, chunked sync with retry/backoff,
 row-level error capture, and a full history log — all from the browser. Pure
 Python, so it runs identically on Windows and on the Ubuntu server next to
@@ -34,6 +36,18 @@ data-flow            # launches the server
 Environment overrides: `DATAFLOW_HOST`, `DATAFLOW_PORT`, `DATAFLOW_DB`
 (path to the SQLite state file; defaults to `./data-flow.db`).
 
+### Share a portable Windows package
+```bat
+.venv\Scripts\python.exe build_package.py
+```
+Builds `dist\data-flow-<version>-windows.zip` (~32 MB): the app plus its own
+Python, so the people you send it to need neither Python nor internet. They
+unzip it and double-click `Data Flow.bat`; `READ-ME-FIRST.txt` inside explains
+the rest. The zip never contains a `data-flow.db` (it holds passwords). To bring
+saved settings along, use History → **Export all data** on the old copy and
+**Import saved settings…** on the new one's Connections tab, or copy the old
+`data-flow.db` into the new folder before starting it.
+
 ## What it does
 
 1. **Connections** — enter + test Oracle and Postgres connections.
@@ -42,13 +56,43 @@ Environment overrides: `DATAFLOW_HOST`, `DATAFLOW_PORT`, `DATAFLOW_DB`
    row-count estimate per table from Oracle's optimizer statistics — safe to
    use even on schemas with thousands of tables, since it never does a live
    `COUNT(*)` per table.
-3. **Columns** — per-table column mapping: rename columns, rename the target
+3. **Groups** — combine **several Oracle tables into one Postgres table**.
+   Pick two or more of your selected tables, name the Postgres target, and
+   choose how they combine:
+   - **Join on keys** — the tables are joined and the target holds their
+     combined columns, one wide row per joined result row. The first table
+     in the order drives the join; each later one says which earlier table
+     it links to, on which column pairs (composite keys supported), as an
+     `inner` join (only matched rows) or a `left` join (keep unmatched rows,
+     NULL-filled). **Suggest from Oracle FKs** fills the link conditions
+     from the schema's foreign keys so you don't type column names.
+     Columns from a left-joined table are declared nullable automatically,
+     and name collisions between sources (two tables both having `NAME`)
+     are suffixed with the source table — a rename on the Columns tab
+     overrides that.
+   - **Union** — the tables are shaped alike and their rows are stacked.
+     The target gets the union of their mapped columns plus a
+     `_source_table` column recording each row's origin, which is what lets
+     one source be reloaded without disturbing the others. Columns only
+     some sources supply become nullable; if two sources send the same
+     column as different Postgres types the group is refused, naming the
+     conflict rather than silently picking one.
+
+   A group's target gets **no primary key** (a join can repeat a source's
+   key, and a union's sources can collide with each other) — add one by hand
+   if the combined data really is unique. A table belongs to at most one
+   group, and a grouped table is never created or synced on its own. The
+   group is created, drift-checked and recreated as a unit: changing any
+   member's mapping, the join conditions or the mode flags the whole group.
+
+4. **Columns** — per-table column mapping: rename columns, rename the target
    table, skip columns, override the Postgres type, and flag a table for
    "fast load" (drop constraints/indexes/FKs before sync, recreate after).
    Detects **schema drift** — if the mapping changes after a table was
    created, it's flagged before the next sync so you can recreate deliberately
    rather than get a silent surprise.
-4. **Migrate & Sync**
+
+5. **Migrate & Sync**
    - Create the selected tables in Postgres (or recreate them to apply a
      changed mapping) and compare row counts side by side.
    - **Pre-flight checks** before every sync: both connections reachable,
@@ -73,7 +117,7 @@ Environment overrides: `DATAFLOW_HOST`, `DATAFLOW_PORT`, `DATAFLOW_DB`
      exponential 1s/2s/4s) for both Oracle and Postgres calls.
    - **Live progress over SSE**: rows loaded, rows/sec throughput, and an ETA,
      in addition to retry/constraint-drop/restore events.
-5. **History** — every sync run (table, start/end time, duration, rows
+6. **History** — every sync run (table, start/end time, duration, rows
    loaded/skipped, status) is logged to SQLite and browsable here, so you can
    spot which tables are slow or fail often. Row-level error detail is
    viewable inline and the full run log (summary + row errors) can be
@@ -91,12 +135,14 @@ data-flow/
 ├─ run.sh / run.bat
 ├─ LICENSE                 # Apache 2.0
 ├─ README.md
+├─ tests/                   # pure checks: run with `python tests/test_*.py`
 └─ src/dataflow/
    ├─ cli.py               # console command -> launches uvicorn
    ├─ main.py              # FastAPI routes (config, test, tables, mapping, migrate, sync/SSE, history)
    ├─ engine.py            # orchestration: create/recreate, compare, dry run, chunked sync stream
    ├─ oracle_client.py     # Oracle connect + metadata + chunked/ordered reads (thin mode)
    ├─ pg_client.py         # Postgres connect + DDL + COPY/row-insert load + constraint introspection (psycopg3)
+   ├─ groups.py            # table groups: join/union of several Oracle tables into one target
    ├─ mapping.py           # per-table column rename/skip/type overrides + drift fingerprinting
    ├─ types_map.py         # Oracle -> Postgres type translation
    ├─ depgraph.py          # topological sort for FK-safe constraint recreation order
@@ -116,6 +162,34 @@ data-flow/
   DML but stay fast even on schemas with thousands of tables. Compare/sync
   elsewhere in the app always use exact counts.
 - Disk space estimation before a sync is intentionally out of scope.
+- A **join group requires a primary key** — or a unique constraint whose
+  columns are all `NOT NULL` — on *every* source. The joined result is paged
+  by the combination of all of them; without a total order, rows sharing the
+  driving table's key straddle a page boundary and the ones after the first
+  are silently skipped. A source with neither is refused rather than loaded
+  incorrectly.
+- A join to a one-to-many relationship **multiplies rows** (one order with
+  three lines gives three result rows, repeating the order's columns). That's
+  normal SQL join behaviour, not a bug — use the row counts on Migrate &
+  Sync, where a join group's Oracle number is the count of the *joined*
+  result, to see what you'll actually get.
+- A **union group** is append-only and doesn't de-duplicate: a row present in
+  two sources lands twice, tagged with different `_source_table` values. Don't
+  drop that column — re-syncing one source issues
+  `DELETE ... WHERE _source_table = ?` rather than a `TRUNCATE`, which on a
+  large source is slower and leaves dead rows for autovacuum.
+- Groups are **load-only**: data flows Oracle → the combined Postgres table.
+  Nothing writes back, and the group doesn't track which source a joined
+  column came from once it's loaded.
+- Sync reads chunks by primary key (`WHERE pk > last`), so chunk cost stays
+  flat across a large table. Tables **without a primary key** fall back to
+  `OFFSET` paging ordered by ROWID, which re-reads and discards every earlier
+  row — fine for small tables, quadratic on big ones.
+- If the browser closes mid-sync, fast-load constraints are restored before the
+  connections close, but silently (there's no stream left to report on). A hard
+  kill of the server process while a fast-load sync is between the drop and the
+  restore will leave those tables without their PK/FK/indexes — recreate the
+  table, or re-run the sync, to get them back.
 
 ## Roadmap
 - Optional **ora2pg-backed DDL** path as an alternative to `types_map.py`.

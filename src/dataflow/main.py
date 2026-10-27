@@ -1,11 +1,14 @@
 """FastAPI backend for the Oracle -> Postgres migration GUI (MVP)."""
+import csv
+import io
 import json
 import os
+import sqlite3
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, PlainTextResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -14,6 +17,8 @@ from . import oracle_client as ora
 from . import pg_client as pg
 from . import engine
 from . import history
+from . import groups
+from . import mapping
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 app = FastAPI(title="Data Flow")
@@ -48,12 +53,44 @@ class ColumnMapping(BaseModel):
     target: str | None = None
     skip: bool = False
     pg_type: str | None = None
+    if_null: str | None = None
+    dictionary: str | None = None
+    lookup_with: list[str] | None = None
+
+
+class JoinPair(BaseModel):
+    left_col: str
+    right_col: str
+
+
+class JoinSpec(BaseModel):
+    right: str
+    left: str
+    type: str = "inner"
+    on: list[JoinPair]
+
+
+class SplitPart(BaseModel):
+    pg_table: str
+    columns: list[str] = Field(default_factory=list)
+    where: str = ""
+
+
+class GroupSpec(BaseModel):
+    """Several Oracle tables feeding one Postgres table (joined on keys, or
+    unioned row-wise), or one split into several. See groups.py."""
+    target: str
+    mode: str = "join"
+    sources: list[str]
+    joins: list[JoinSpec] = Field(default_factory=list)
+    parts: list[SplitPart] = Field(default_factory=list)
 
 
 class TableMapping(BaseModel):
     pg_table: str | None = None
     columns: list[ColumnMapping]
     fast_load: bool = False
+    upsert: bool = False
 
 
 def _json_default(obj):
@@ -117,6 +154,32 @@ def test_pg():
         return {"ok": False, "error": str(e)}
 
 
+def _pg_read(fn):
+    """Run fn(con, schema) on a short-lived Postgres connection."""
+    cfg = store.get("pg")
+    if not cfg:
+        return JSONResponse({"error": "Save Postgres connection first."}, status_code=400)
+    try:
+        con = pg.connect(cfg)
+        try:
+            return fn(con, cfg["target_schema"])
+        finally:
+            con.close()
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/pg/tables")
+def pg_tables():
+    """Existing tables in the target schema, so a mapping can load into one."""
+    return _pg_read(lambda con, schema: {"tables": pg.list_tables(con, schema)})
+
+
+@app.get("/api/pg/table/{table}/columns")
+def pg_table_columns(table: str):
+    return _pg_read(lambda con, schema: {"columns": pg.get_columns(con, schema, table)})
+
+
 # ---------- tables / selection ----------
 @app.get("/api/oracle/tables")
 def oracle_tables():
@@ -152,9 +215,41 @@ def table_columns(table: str):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+@app.get("/api/table/{table}/filled")
+def table_filled_columns(table: str):
+    """Which Oracle columns have data. Separate from /columns because it
+    scans the table and can be slow; the grid highlights them when it lands."""
+    try:
+        return {"filled": engine.filled_columns(table)}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
 @app.post("/api/table/{table}/mapping")
 def save_table_mapping(table: str, m: TableMapping):
-    engine.save_mapping(table, m.pg_table, [c.model_dump() for c in m.columns], m.fast_load)
+    error = engine.save_mapping(table, m.pg_table, [c.model_dump() for c in m.columns],
+                                m.fast_load, m.upsert)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
+    return {"ok": True}
+
+
+@app.post("/api/table/{table}/mapping/new")
+def new_table_mapping(table: str):
+    """Key for an extra mapping on this Oracle table (stored on first save)."""
+    return {"key": mapping.next_extra(mapping.oracle_table(table))}
+
+
+@app.delete("/api/table/{table}/mapping")
+def delete_table_mapping(table: str):
+    """Forget a mapping. Never touches Postgres. Deleting a table's main
+    mapping also drops its extra mappings and takes the table out of the
+    selection, since a selected table always maps somewhere."""
+    if not mapping.is_extra(table):
+        for k in mapping.extras(table):
+            mapping.delete(k)
+        store.put("selection", [t for t in store.get("selection", []) if t != table])
+    mapping.delete(table)
     return {"ok": True}
 
 
@@ -163,6 +258,103 @@ def mappings_status(tables: str = ""):
     names = [t for t in tables.split(",") if t] or store.get("selection", [])
     try:
         return {"rows": engine.mapping_status(names)}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+# ---------- dictionaries ----------
+@app.get("/api/dictionaries")
+def list_dictionaries():
+    return {"dictionaries": [dict(name=n, entries=len(d)) for n, d in sorted(mapping.dictionaries().items())],
+            "lookups": mapping.lookups()}
+
+
+@app.post("/api/dictionaries/{name}")
+async def save_dictionary(name: str, request: Request, filename: str = "rows.csv", replace: bool = False):
+    """The request body is the file itself (.xlsx or delimited text) - no
+    multipart, so no extra dependency. Adds/updates entries, or with
+    replace swaps the whole dictionary."""
+    try:
+        rows = mapping.read_table(await request.body(), filename)
+        return mapping.save_dictionary(name, rows, replace=replace)
+    except Exception as e:  # noqa: BLE001 - bad workbook, bad encoding, bad rows
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+class DictionaryKeys(BaseModel):
+    oracle: list[str]
+
+
+@app.post("/api/dictionaries/{name}/delete-entries")
+def delete_dictionary_entries(name: str, keys: DictionaryKeys):
+    if name not in mapping.dictionaries():
+        return JSONResponse({"error": f"No dictionary named {name}."}, status_code=404)
+    return mapping.delete_entries(name, keys.oracle)
+
+
+@app.get("/api/dictionaries/{name}/export")
+def export_dictionary(name: str):
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["oracle", "postgres"])
+    w.writerows(mapping.dictionaries().get(name, {}).items())
+    return PlainTextResponse(out.getvalue(), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{name}.csv"'})
+
+
+@app.delete("/api/dictionaries/{name}")
+def delete_dictionary(name: str):
+    mapping.delete_dictionary(name)
+    return {"ok": True}
+
+
+class LookupSpec(BaseModel):
+    table: str
+    match: list[str]
+    value: str
+
+
+@app.post("/api/lookups/{name}")
+def save_lookup(name: str, spec: LookupSpec):
+    try:
+        return mapping.save_lookup(name, spec.table, spec.match, spec.value)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.delete("/api/lookups/{name}")
+def delete_lookup(name: str):
+    mapping.delete_lookup(name)
+    return {"ok": True}
+
+
+# ---------- table groups ----------
+@app.get("/api/groups")
+def list_groups():
+    return {"groups": groups.all_groups()}
+
+
+@app.post("/api/groups")
+def save_group(spec: GroupSpec):
+    group, errors = groups.save(spec.model_dump())
+    if errors:
+        return JSONResponse({"errors": errors}, status_code=400)
+    return {"ok": True, "group": group}
+
+
+@app.delete("/api/groups/{target}")
+def delete_group(target: str):
+    groups.delete(target)
+    return {"ok": True}
+
+
+@app.get("/api/oracle/foreign-keys")
+def oracle_foreign_keys(tables: str = ""):
+    """FKs among the given Oracle tables, so the group editor can offer a
+    ready-made link instead of making the user type column names."""
+    names = [t for t in tables.split(",") if t]
+    try:
+        return {"fks": engine.foreign_keys(names)}
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -263,6 +455,68 @@ def sync_run_export(run_id: int):
     return PlainTextResponse(body, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+# ---------- export ----------
+@app.get("/api/export")
+def export_all():
+    """All user data - connections (passwords included), selection,
+    mappings, groups, sync history, row errors, checkpoints - as one
+    consistent copy of the SQLite store. Restore by putting it back as
+    data-flow.db while the app is stopped."""
+    c = sqlite3.connect(store.DB_PATH)
+    try:
+        data = c.serialize()
+    finally:
+        c.close()
+    filename = f"data-flow-{datetime.now():%Y%m%d-%H%M%S}.db"
+    return Response(data, media_type="application/vnd.sqlite3",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def _copy_db(source, dest_path):
+    """Overwrite the database at dest_path with `source` (SQLite backup API:
+    safe while the app has the destination open)."""
+    d = sqlite3.connect(dest_path)
+    try:
+        source.backup(d)
+    finally:
+        d.close()
+
+
+@app.post("/api/import")
+async def import_all(request: Request):
+    """Replace everything this installation stores with a file made by
+    "Export all data" (the request body is the file). The current store is
+    first copied to <db>.bak-<timestamp>, so a wrong import can be undone by
+    hand. Don't import while a sync is running."""
+    tmp = os.path.join(os.path.dirname(os.path.abspath(store.DB_PATH)),
+                       f".import-{datetime.now():%Y%m%d%H%M%S}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(await request.body())
+        src = sqlite3.connect(tmp)
+        try:
+            src.execute("SELECT key, value FROM settings LIMIT 1")  # an export always has this
+            if src.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise sqlite3.DatabaseError("file is damaged")
+            store.get("selection")  # makes sure the live store exists before it is backed up
+            backup = f"{store.DB_PATH}.bak-{datetime.now():%Y%m%d-%H%M%S}"
+            live = sqlite3.connect(store.DB_PATH)
+            try:
+                _copy_db(live, backup)
+            finally:
+                live.close()
+            _copy_db(src, store.DB_PATH)
+        finally:
+            src.close()
+        return {"ok": True, "backup": os.path.basename(backup)}
+    except sqlite3.DatabaseError:
+        return JSONResponse({"error": "That is not a Data Flow export (.db file from \"Export all data\")."},
+                            status_code=400)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 # ---------- static UI ----------
 @app.get("/")
 def index():
@@ -273,3 +527,13 @@ def favicon():
     return FileResponse(os.path.join(HERE, "static", "favicon.ico"))
 
 app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
+
+
+@app.middleware("http")
+async def no_stale_ui(request, call_next):
+    """Make the browser revalidate the UI files (cheap 304 via ETag) so an
+    updated app.js is never paired with a cached older one."""
+    resp = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp

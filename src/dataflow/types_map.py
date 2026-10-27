@@ -65,6 +65,17 @@ def coldef(col, pg_name, pg_type_value):
     return f'"{pg_name}" {pg_type_value}{null}'
 
 
+# Provenance column added to a Postgres table fed by more than one Oracle
+# table (see mapping.union_columns). It earns its keep by making a re-sync of
+# one source possible: without it, reloading one source would have to TRUNCATE
+# the shared target and take every other source's rows with it.
+SOURCE_COLUMN = "_source_table"
+
+
+def source_coldef():
+    return f'"{SOURCE_COLUMN}" text NOT NULL'
+
+
 # Manual override choices offered in the column-mapping UI's type dropdown.
 # Deliberately plain (no length/precision) - Postgres parses the incoming
 # COPY text into whatever the declared column type is, so an override like

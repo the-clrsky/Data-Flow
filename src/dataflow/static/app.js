@@ -1,7 +1,20 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const api = (url, opts) => fetch(url, opts).then((r) => r.json());
+const api = async (url, opts) => {
+  const r = await fetch(url, opts);
+  const body = await r.json().catch(() => ({}));
+  // Without this a 404 (e.g. a server still running pre-upgrade code) returns
+  // {} and every caller reads it as an empty success, so nothing happens and
+  // nothing is reported. Callers all check .error already.
+  if (!r.ok) {
+    return {
+      error: body.detail || body.error || `HTTP ${r.status} ${r.statusText} — ${url}`,
+      errors: body.errors,
+    };
+  }
+  return body;
+};
 
 // ---------- tabs ----------
 document.querySelectorAll(".tab").forEach((t) => {
@@ -10,7 +23,8 @@ document.querySelectorAll(".tab").forEach((t) => {
     document.querySelectorAll(".panel").forEach((x) => x.classList.remove("active"));
     t.classList.add("active");
     $(t.dataset.tab).classList.add("active");
-    if (t.dataset.tab === "columns") loadMappingSummary();
+    if (t.dataset.tab === "groups") loadGroups();
+    if (t.dataset.tab === "columns") { loadMappingSummary(); loadDictionaries(); }
     if (t.dataset.tab === "migrate") { refreshCompare(); refreshDriftPanel(); refreshCheckpointPanel(); }
     if (t.dataset.tab === "history") loadHistory();
   };
@@ -39,7 +53,11 @@ async function loadConfig() {
     p_target_schema.value = c.pg.target_schema || "public";
   }
   selection = c.selection || [];
+  // a fresh install: offer the settings from an older copy or another PC
+  $("first_run").hidden = !!(c.oracle || c.pg);
 }
+
+$("first_run_import").onclick = () => $("import_file").click();
 
 $("o_save").onclick = async () => {
   const body = {
@@ -144,6 +162,130 @@ $("save_selection").onclick = async () => {
 // ---------- column mapping ----------
 let currentColTable = null;
 let pgTypeChoices = [];
+let dictNames = [];  // dictionaries, then Postgres lookups
+let lookupDefs = {};  // name -> {table, match, value}
+
+// options for a column's Dictionary select; keeps a saved choice that was since deleted
+function fillDictSelect(sel, value) {
+  sel.replaceChildren(new Option("—", ""), ...[...new Set([...dictNames, value].filter(Boolean))]
+    .map((n) => new Option(lookupDefs[n] ? `${n} (lookup)` : n, n)));
+  sel.value = value || "";
+  sel.onchange?.();
+}
+
+async function loadDictionaries() {
+  const r = await api("/api/dictionaries");
+  if (r.error) return setStatus($("dict_status"), r.error, false);
+  lookupDefs = r.lookups;
+  dictNames = [...r.dictionaries.map((d) => d.name), ...Object.keys(lookupDefs).sort()];
+  document.querySelectorAll("#col_grid .col-dict").forEach((s) => fillDictSelect(s, s.value));
+  $("lk_list").replaceChildren(...Object.keys(lookupDefs).sort().map((name) => {
+    const lk = lookupDefs[name];
+    const item = document.createElement("div");
+    item.className = "mapping-item row";
+    item.style.margin = "0";
+    const del = Object.assign(document.createElement("button"), { className: "danger", textContent: "Delete" });
+    del.onclick = async () => {
+      if (!confirm(`Delete lookup ${name}? Columns using it will fail to sync until you pick another.`)) return;
+      const x = await api("/api/lookups/" + encodeURIComponent(name), { method: "DELETE" });
+      if (x.error) return setStatus($("lk_status"), x.error, false);
+      loadDictionaries();
+    };
+    item.append(Object.assign(document.createElement("span"), {
+      className: "mapping-item-name", style: "flex: 1",
+      textContent: `${name}: ${lk.table}.${lk.value} where ${lk.match.join(", ")} match`,
+    }), del);
+    // pick to edit
+    item.onclick = (e) => {
+      if (e.target !== item && e.target.tagName !== "SPAN") return;
+      $("lk_name").value = name;
+      $("lk_table").value = lk.table;
+      $("lk_match").value = lk.match.join(", ");
+      $("lk_value").value = lk.value;
+    };
+    return item;
+  }));
+  $("dict_list").replaceChildren(...r.dictionaries.map((d) => {
+    const item = document.createElement("div");
+    item.className = "mapping-item row";
+    item.style.margin = "0";
+    const del = Object.assign(document.createElement("button"), { className: "danger", textContent: "Delete" });
+    del.onclick = async () => {
+      if (!confirm(`Delete dictionary ${d.name}? Columns using it will fail to sync until you pick another.`)) return;
+      const x = await api("/api/dictionaries/" + encodeURIComponent(d.name), { method: "DELETE" });
+      if (x.error) return setStatus($("dict_status"), x.error, false);
+      loadDictionaries();
+    };
+    const csv = Object.assign(document.createElement("a"), {
+      className: "link", textContent: "Download",
+      href: "/api/dictionaries/" + encodeURIComponent(d.name) + "/export",
+    });
+    item.append(Object.assign(document.createElement("span"), {
+      className: "mapping-item-name", textContent: `${d.name} (${d.entries} entries)`, style: "flex: 1",
+    }), csv, del);
+    // pick to update: uploads and pasted rows go to the name in the box
+    item.onclick = (e) => { if (e.target === item || e.target.tagName === "SPAN") $("dict_name").value = d.name; };
+    return item;
+  }));
+}
+
+// body: the file (or pasted text) as is; the server reads .xlsx or delimited text by filename
+async function sendDictRows(body, filename, replace) {
+  const name = $("dict_name").value.trim();
+  if (!name) { setStatus($("dict_status"), "Name the dictionary, or pick one below to update it", false); return false; }
+  if (replace && dictNames.includes(name) && !confirm(`Replace every entry in ${name}?`)) return false;
+  const r = await api(`/api/dictionaries/${encodeURIComponent(name)}?filename=${encodeURIComponent(filename)}&replace=${replace}`,
+    { method: "POST", body });
+  if (r.error) { setStatus($("dict_status"), r.error, false); return false; }
+  setStatus($("dict_status"), `${name}: ${fmt(r.added)} added, ${fmt(r.updated)} updated — ${fmt(r.total)} entries`, true);
+  loadDictionaries();
+  return true;
+}
+
+$("lk_save").onclick = async () => {
+  const name = $("lk_name").value.trim();
+  if (!name) return setStatus($("lk_status"), "Name the lookup, or pick one below to edit it", false);
+  const r = await api("/api/lookups/" + encodeURIComponent(name), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ table: $("lk_table").value, match: $("lk_match").value.split(","), value: $("lk_value").value }),
+  });
+  if (r.error) return setStatus($("lk_status"), r.error, false);
+  setStatus($("lk_status"), `${name} saved`, true);
+  loadDictionaries();
+};
+
+$("dict_upload").onclick = async () => {
+  const file = $("dict_file").files[0];
+  if (!file) return setStatus($("dict_status"), "Pick an Excel or CSV file", false);
+  if (await sendDictRows(file, file.name, $("dict_replace").checked)) {
+    $("dict_file").value = "";
+    $("dict_replace").checked = false;
+  }
+};
+
+$("dict_add_rows").onclick = async () => {
+  const text = $("dict_rows").value.trim();
+  if (!text) return setStatus($("dict_status"), "Type or paste some rows first", false);
+  const delim = ["\t", ";", ","].find((c) => text.includes(c)) || ",";
+  if (await sendDictRows(`oracle${delim}postgres\n${text}\n`, "rows.csv", false)) $("dict_rows").value = "";
+};
+
+$("dict_delete_rows").onclick = async () => {
+  const name = $("dict_name").value.trim();
+  if (!name) return setStatus($("dict_status"), "Pick the dictionary below first", false);
+  // first column of each line: the old ID
+  const oracle = $("dict_rows").value.split("\n").map((l) => l.split(/[\t;,]/)[0].trim()).filter(Boolean);
+  if (!oracle.length) return setStatus($("dict_status"), "List the old IDs to delete, one per line", false);
+  if (!confirm(`Delete ${oracle.length} entr${oracle.length === 1 ? "y" : "ies"} from ${name}?`)) return;
+  const r = await api(`/api/dictionaries/${encodeURIComponent(name)}/delete-entries`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ oracle }),
+  });
+  if (r.error) return setStatus($("dict_status"), r.error, false);
+  const missing = r.not_found.length ? ` — not in it: ${r.not_found.join(", ")}` : "";
+  setStatus($("dict_status"), `${name}: ${fmt(r.removed)} deleted, ${fmt(r.total)} entries left${missing}`, r.not_found.length ? null : true);
+  if (!r.not_found.length) $("dict_rows").value = "";
+  loadDictionaries();
+};
 
 function typeLabel(c) {
   if (c.dtype === "NUMBER") {
@@ -161,14 +303,24 @@ function mappingBadges(row) {
   if (row.drift) badges.push(`<span class="badge err">mapping changed</span>`);
   if (!row.renamed && !row.skipped) badges.push('<span class="badge muted">default</span>');
   if (row.fast_load) badges.push('<span class="badge">fast load</span>');
+  if (row.group)
+    badges.push(
+      `<span class="badge">${row.group_mode} → ${row.group}</span>` +
+      (row.group_with.length ? ` <span class="badge muted">with ${row.group_with.join(", ")}</span>` : "")
+    );
   return badges;
 }
 
+let summaryReq = 0;
 async function loadMappingSummary() {
   const list = $("mapping_summary");
   list.innerHTML = '<p class="status">Loading…</p>';
   const q = selection.length ? "?tables=" + encodeURIComponent(selection.join(",")) : "";
+  // each call hits Oracle per table and can be slow; a reply that comes back
+  // after a newer request (e.g. one fired before a delete) must not repaint
+  const req = ++summaryReq;
   const r = await api("/api/mappings" + q);
+  if (req !== summaryReq) return;
   if (r.error) {
     list.innerHTML = `<p class="status err">${r.error}</p>`;
     return;
@@ -192,61 +344,166 @@ async function loadMappingSummary() {
 function renderColumnGrid(cols) {
   const tb = $("col_grid").querySelector("tbody");
   tb.innerHTML = "";
-  cols.forEach((c) => {
-    const tr = document.createElement("tr");
-
-    const tdName = document.createElement("td");
-    tdName.textContent = c.name;
-
-    const tdType = document.createElement("td");
-    tdType.textContent = typeLabel(c);
-
-    const tdTarget = document.createElement("td");
-    const targetInput = document.createElement("input");
-    targetInput.value = c.target;
-    targetInput.dataset.name = c.name;
-    targetInput.className = "col-target";
-    targetInput.disabled = c.skip;
-    tdTarget.appendChild(targetInput);
-
-    const tdPgType = document.createElement("td");
-    const typeSelect = document.createElement("select");
-    typeSelect.className = "col-pgtype";
-    typeSelect.dataset.name = c.name;
-    typeSelect.disabled = c.skip;
-    const defaultOpt = document.createElement("option");
-    defaultOpt.value = "";
-    defaultOpt.textContent = `Default (${c.default_pg_type})`;
-    typeSelect.appendChild(defaultOpt);
-    pgTypeChoices.forEach((t) => {
-      const opt = document.createElement("option");
-      opt.value = t;
-      opt.textContent = t;
-      typeSelect.appendChild(opt);
-    });
-    typeSelect.value = c.pg_type_override || "";
-    tdPgType.appendChild(typeSelect);
-
-    const tdSkip = document.createElement("td");
-    const skipCb = document.createElement("input");
-    skipCb.type = "checkbox";
-    skipCb.checked = c.skip;
-    skipCb.className = "col-skip";
-    skipCb.dataset.name = c.name;
-    skipCb.onchange = () => {
-      targetInput.disabled = skipCb.checked;
-      typeSelect.disabled = skipCb.checked;
-    };
-    tdSkip.appendChild(skipCb);
-
-    tr.append(tdName, tdType, tdTarget, tdPgType, tdSkip);
-    tb.appendChild(tr);
-  });
+  cols.forEach((c) => tb.appendChild(columnRow(c)));
+  syncUseAll();
 }
+
+let filledCols = new Set();  // Oracle columns of the open table that hold data
+
+// Highlights those columns; the check scans the table, so it lands after the grid
+async function loadFilled(table) {
+  const note = $("col_filled_note");
+  setStatus(note, "Checking which columns have data…");
+  const r = await api("/api/table/" + encodeURIComponent(table) + "/filled");
+  if (table !== currentColTable) return;  // another table was opened meanwhile
+  if (r.error) return setStatus(note, "Could not check for data: " + r.error, false);
+  filledCols = new Set(r.filled);
+  document.querySelectorAll("#col_grid tbody tr").forEach((tr) =>
+    tr.firstElementChild.classList.toggle("has-data", filledCols.has(tr.dataset.col)));
+  setStatus(note, `${filledCols.size} of ${new Set([...document.querySelectorAll("#col_grid tbody tr")].map((tr) => tr.dataset.col)).size} columns have data (highlighted).`);
+}
+
+function columnRow(c) {
+  const tr = document.createElement("tr");
+
+  // "+" gives this Oracle column another Postgres destination (a copy row,
+  // saved as the same name listed again); "×" removes a copy
+  const tdName = document.createElement("td");
+  tdName.textContent = (c.copy ? "↳ " : "") + c.name + " ";
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.textContent = c.copy ? "×" : "+";
+  copyBtn.title = c.copy ? "Remove this destination" : "Also load this column into another Postgres column";
+  copyBtn.onclick = () => {
+    if (c.copy) {
+      tr.remove();
+      syncUseAll();
+      checkTargets();
+      return;
+    }
+    let last = tr;  // after the last of this column's copies
+    while (last.nextElementSibling && last.nextElementSibling.classList.contains("col-copy")) last = last.nextElementSibling;
+    const n = [...tr.parentNode.querySelectorAll("tr")].filter((r) => r.dataset.col === c.name).length + 1;
+    last.after(columnRow({ ...c, copy: true, skip: false, target: `${c.name.toLowerCase()}_${n}`,
+                           pg_type_override: null, dictionary: null, lookup_with: null, if_null: null }));
+    fillPgColSelects();
+    syncUseAll();
+    checkTargets();
+  };
+  tdName.appendChild(copyBtn);
+  tdName.classList.toggle("has-data", filledCols.has(c.name));
+  tr.dataset.col = c.name;
+  tr.classList.toggle("col-copy", !!c.copy);
+
+  const tdType = document.createElement("td");
+  tdType.textContent = typeLabel(c);
+
+  const tdTarget = document.createElement("td");
+  const targetInput = document.createElement("input");
+  targetInput.value = c.target;
+  targetInput.dataset.name = c.name;
+  targetInput.dataset.orig = c.target;
+  targetInput.className = "col-target";
+  targetInput.disabled = c.skip;
+  targetInput.setAttribute("list", "pg_cols_list");
+  targetInput.oninput = checkTargets;
+  // shown instead of the text box when the target table already exists
+  const pgColSelect = document.createElement("select");
+  pgColSelect.className = "col-pgcol";
+  pgColSelect.hidden = true;
+  pgColSelect.disabled = c.skip;
+  pgColSelect.onchange = () => { targetInput.value = pgColSelect.value; checkTargets(); };
+  tdTarget.append(targetInput, pgColSelect);
+
+  const tdPgType = document.createElement("td");
+  const typeSelect = document.createElement("select");
+  typeSelect.className = "col-pgtype";
+  typeSelect.dataset.name = c.name;
+  typeSelect.disabled = c.skip;
+  const defaultOpt = document.createElement("option");
+  defaultOpt.value = "";
+  defaultOpt.textContent = `Default (${c.default_pg_type})`;
+  typeSelect.appendChild(defaultOpt);
+  pgTypeChoices.forEach((t) => {
+    const opt = document.createElement("option");
+    opt.value = t;
+    opt.textContent = t;
+    typeSelect.appendChild(opt);
+  });
+  typeSelect.value = c.pg_type_override || "";
+  tdPgType.appendChild(typeSelect);
+
+  const tdDict = document.createElement("td");
+  const dictSelect = document.createElement("select");
+  dictSelect.className = "col-dict";
+  dictSelect.disabled = c.skip;
+  // a lookup matching on several columns takes the others from this row's Oracle columns
+  const withInput = document.createElement("input");
+  withInput.className = "col-lkwith";
+  withInput.value = (c.lookup_with || []).join(", ");
+  withInput.disabled = c.skip;
+  dictSelect.onchange = () => {
+    const more = (lookupDefs[dictSelect.value]?.match || []).slice(1);
+    withInput.hidden = !more.length;
+    withInput.placeholder = `Oracle column(s) for ${more.join(", ")}`;
+    withInput.title = `Matched against ${more.join(", ")}, in that order`;
+  };
+  fillDictSelect(dictSelect, c.dictionary);
+  tdDict.append(dictSelect, withInput);
+
+  const tdIfNull = document.createElement("td");
+  const ifNullInput = document.createElement("input");
+  ifNullInput.className = "col-ifnull";
+  ifNullInput.value = c.if_null ?? "";
+  ifNullInput.placeholder = c.nullable ? "" : "required";
+  ifNullInput.title = "Loaded instead of NULL when the Oracle value is empty";
+  ifNullInput.disabled = c.skip;
+  tdIfNull.appendChild(ifNullInput);
+
+  const tdUse = document.createElement("td");
+  const useCb = document.createElement("input");
+  useCb.type = "checkbox";
+  useCb.checked = !c.skip;
+  useCb.className = "col-use";
+  useCb.dataset.name = c.name;
+  useCb.onchange = () => {
+    targetInput.disabled = !useCb.checked;
+    pgColSelect.disabled = !useCb.checked;
+    typeSelect.disabled = !useCb.checked;
+    dictSelect.disabled = !useCb.checked;
+    withInput.disabled = !useCb.checked;
+    ifNullInput.disabled = !useCb.checked;
+    syncUseAll();
+    checkTargets();
+  };
+  tdUse.appendChild(useCb);
+
+  tr.append(tdName, tdType, tdTarget, tdPgType, tdDict, tdIfNull, tdUse);
+  return tr;
+}
+
+// header checkbox: ticked when every column is used, dashed when some are
+function syncUseAll() {
+  const boxes = [...document.querySelectorAll("#col_grid .col-use")];
+  const on = boxes.filter((b) => b.checked).length;
+  $("col_use_all").checked = boxes.length > 0 && on === boxes.length;
+  $("col_use_all").indeterminate = on > 0 && on < boxes.length;
+}
+
+$("col_use_all").onchange = () => {
+  document.querySelectorAll("#col_grid .col-use").forEach((b) => {
+    b.checked = $("col_use_all").checked;
+    b.onchange();
+  });
+};
 
 async function loadColumns(table) {
   currentColTable = table;
-  $("col_table_title").textContent = table;
+  // extra mappings are keyed "ORACLE_TABLE:n"
+  const [oracleTable, n] = table.split(":");
+  $("col_table_title").textContent = n ? `${oracleTable} (mapping ${n})` : table;
+  $("col_new").disabled = false;
+  $("col_delete").hidden = false;
   setStatus($("columns_status"), "Loading…");
   const r = await api("/api/table/" + encodeURIComponent(table) + "/columns");
   if (r.error) {
@@ -256,6 +513,8 @@ async function loadColumns(table) {
     $("col_pg_table").disabled = true;
     $("col_fast_load").checked = false;
     $("col_fast_load").disabled = true;
+    $("col_upsert").checked = false;
+    $("col_upsert").disabled = true;
     $("col_save").disabled = true;
     return;
   }
@@ -263,36 +522,578 @@ async function loadColumns(table) {
   $("col_pg_table").disabled = false;
   $("col_fast_load").checked = !!r.fast_load;
   $("col_fast_load").disabled = false;
+  $("col_upsert").checked = !!r.upsert;
+  $("col_upsert").disabled = false;
   $("col_save").disabled = false;
   pgTypeChoices = r.pg_type_choices || [];
-  renderColumnGrid(r.columns);
-  setStatus($("columns_status"), "", null);
+  dictNames = r.dictionaries || [];
+  lookupDefs = r.lookups || {};
+  // a never-saved mapping opens with nothing ticked: pick only what you need
+  // (until it's saved, a sync still takes every column)
+  filledCols = new Set();
+  loadFilled(table);  // not awaited: it scans the table
+  renderColumnGrid(r.saved ? r.columns : r.columns.map((c) => ({ ...c, skip: true })));
+  setStatus($("columns_status"),
+    r.saved ? "" : "Not saved yet: tick the columns you need, then Save. Until then a sync takes every column.", null);
+  await loadPgTables(true);  // fresh each time: the Postgres connection may have changed
+  $("col_pg_pick").replaceChildren(pgTablesError
+    ? Object.assign(document.createElement("p"), { className: "status err", textContent: "Postgres: " + pgTablesError })
+    : pgTablePicker($("col_pg_table")));
+  await onPgTableChange();
   loadMappingSummary();
+}
+
+// ----- mapping onto an existing Postgres table -----
+let pgTables = null;   // existing tables in the target schema, fetched once
+let pgCols = null;     // columns of the chosen table when it already exists
+
+async function loadPgTables(force) {
+  if (pgTables && !force) return;
+  const r = await api("/api/pg/tables");
+  pgTables = r.error ? [] : r.tables;
+  pgTablesError = r.error || null;
+}
+let pgTablesError = null;
+
+// Search box + results for existing Postgres tables, filling `input` -
+// laid out like the Oracle table search: nothing listed until you type,
+// the picked table always shown ticked. `note` (optional) gets a warning
+// while the input names an existing table.
+function pgTablePicker(input, note) {
+  const wrap = document.createElement("div");
+  const search = document.createElement("input");
+  search.autocomplete = "off";
+  search.placeholder = `search ${(pgTables || []).length} existing Postgres tables…`;
+  const list = document.createElement("div");
+  list.className = "tablelist";
+  list.style.cssText = "max-height: 180px; overflow-y: auto;";
+  const group = "pgpick" + Math.random().toString(36).slice(2);
+  const render = () => {
+    const f = search.value.trim().toLowerCase();
+    const cur = input.value.trim();
+    const picked = (pgTables || []).includes(cur) ? [cur] : [];
+    const shown = [...picked, ...(f ? pgTables.filter((t) => t.includes(f) && t !== cur) : [])];
+    list.replaceChildren(...shown.map((t) => {
+      const row = document.createElement("label");
+      const rb = document.createElement("input");
+      rb.type = "radio";
+      rb.name = group;
+      rb.checked = t === cur;
+      rb.onchange = () => { input.value = t; input.dispatchEvent(new Event("input")); };
+      row.append(rb, document.createTextNode(" " + t));
+      return row;
+    }));
+  };
+  const refreshNote = () => {
+    if (note) note.textContent = (pgTables || []).includes(input.value.trim())
+      ? "Existing table: column names come from each source's mapping (Mappings tab) and must already exist in it. A full sync replaces all its rows."
+      : "";
+  };
+  // one listener per input, even when the picker is rebuilt
+  if (input._pickerOff) input._pickerOff.abort();
+  input._pickerOff = new AbortController();
+  input.addEventListener("input", () => { render(); refreshNote(); }, { signal: input._pickerOff.signal });
+  search.oninput = render;
+  render();
+  refreshNote();
+  wrap.append(search, list);
+  if (note) wrap.appendChild(note);
+  return wrap;
+}
+
+async function onPgTableChange() {
+  const name = $("col_pg_table").value.trim();
+  pgCols = null;
+  if (pgTables && pgTables.includes(name)) {
+    const r = await api("/api/pg/table/" + encodeURIComponent(name) + "/columns");
+    if ($("col_pg_table").value.trim() !== name) return;  // typed on meanwhile
+    pgCols = r.error ? null : r.columns;
+  }
+  $("pg_cols_list").innerHTML = (pgCols || [])
+    .map((c) => `<option value="${c.name}">${c.type}</option>`).join("");
+  $("col_pg_existing").textContent = pgCols
+    ? `Existing table (${pgCols.length} columns): pick the Postgres column for each Oracle column. A full sync replaces all rows in it.`
+    : "";
+  fillPgColSelects();
+  checkTargets();
+}
+
+// Existing table: each row's target becomes a pick-list of its Postgres
+// columns. A column already named like the target is preselected.
+function fillPgColSelects() {
+  document.querySelectorAll("#col_grid tbody tr").forEach((tr) => {
+    const input = tr.querySelector(".col-target");
+    const sel = tr.querySelector(".col-pgcol");
+    input.hidden = !!pgCols;
+    sel.hidden = !pgCols;
+    if (!pgCols) {
+      if (!input.value) input.value = input.dataset.orig;  // back from an existing table
+      return;
+    }
+    const cur = input.value.trim().toLowerCase();
+    const match = pgCols.some((c) => c.name === cur);
+    sel.innerHTML = '<option value="">(not mapped)</option>' +
+      pgCols.map((c) => `<option value="${c.name}">${c.name}  ·  ${c.type}</option>`).join("");
+    sel.value = match ? cur : "";
+    input.value = sel.value;
+  });
+}
+$("col_pg_table").oninput = onPgTableChange;
+
+// Flags used columns whose target is taken twice (red) or, on an existing
+// table, isn't one of its columns (amber - the sync would fail on it).
+// Returns the duplicate count so Save can refuse.
+function checkTargets() {
+  const rows = [...document.querySelectorAll("#col_grid tbody tr")];
+  const used = rows.filter((tr) => tr.querySelector(".col-use").checked);
+  const name = (tr) => tr.querySelector(".col-target").value.trim().toLowerCase();
+  const counts = {};
+  used.forEach((tr) => { counts[name(tr)] = (counts[name(tr)] || 0) + 1; });
+  const existing = pgCols && new Set(pgCols.map((c) => c.name));
+  let dups = 0;
+  rows.forEach((tr) => {
+    const input = tr.querySelector(".col-target");
+    const on = tr.querySelector(".col-use").checked;
+    const dup = on && counts[name(tr)] > 1;
+    const missing = on && existing && !existing.has(name(tr));
+    [input, tr.querySelector(".col-pgcol")].forEach((el) => {
+      el.classList.toggle("dup", dup);
+      el.classList.toggle("missing", !dup && !!missing);
+      el.title = dup ? "Another Oracle column already maps here"
+        : missing ? (existing && !name(tr) ? "Pick a Postgres column" : "Not a column of the existing table") : "";
+    });
+    if (dup) dups++;
+  });
+  renderPgOnly(new Set(used.map(name)));
+  return dups;
+}
+
+// Columns of the existing table no Oracle column fills: the sync leaves
+// them NULL / default, which fails outright if NOT NULL with no default.
+function renderPgOnly(mapped) {
+  const box = $("col_pg_only");
+  const rest = (pgCols || []).filter((c) => !mapped.has(c.name));
+  if (!rest.length) { box.innerHTML = ""; return; }
+  const blocking = rest.filter((c) => c.not_null && !c.has_default);
+  box.innerHTML =
+    `<h3>Postgres-only columns (${rest.length}) — not filled from Oracle</h3>` +
+    (blocking.length ? `<p class="status err">${blocking.length} are NOT NULL with no default — the sync will fail unless an Oracle column maps to them.</p>` : "") +
+    '<table class="grid"><thead><tr><th>Postgres column</th><th>Type</th><th>Gets</th></tr></thead><tbody>' +
+    rest.map((c) => {
+      const gets = c.has_default ? "its default" : c.not_null ? '<span class="mismatch">nothing — NOT NULL</span>' : "NULL";
+      return `<tr><td>${c.name}</td><td>${c.type}</td><td>${gets}</td></tr>`;
+    }).join("") + "</tbody></table>";
 }
 
 $("mapping_refresh").onclick = loadMappingSummary;
 
 $("col_save").onclick = async () => {
   if (!currentColTable) return;
+  if (checkTargets()) return setStatus($("columns_status"), "Two columns map to the same target (marked red)", false);
+  if (document.querySelector("#col_grid .col-pgcol.missing:not([hidden])"))
+    return setStatus($("columns_status"), "Pick a Postgres column for every used column (marked amber)", false);
   const rows = [...$("col_grid").querySelectorAll("tbody tr")];
   const columns = rows.map((tr) => ({
     name: tr.querySelector(".col-target").dataset.name,
     target: tr.querySelector(".col-target").value,
-    skip: tr.querySelector(".col-skip").checked,
+    skip: !tr.querySelector(".col-use").checked,
     pg_type: tr.querySelector(".col-pgtype").value || null,
+    if_null: tr.querySelector(".col-ifnull").value || null,
+    dictionary: tr.querySelector(".col-dict").value || null,
+    lookup_with: tr.querySelector(".col-lkwith").hidden ? null : tr.querySelector(".col-lkwith").value.split(","),
   }));
   const body = {
     pg_table: $("col_pg_table").value || null, columns,
     fast_load: $("col_fast_load").checked,
+    upsert: $("col_upsert").checked,
   };
-  await api("/api/table/" + encodeURIComponent(currentColTable) + "/mapping", {
+  const r = await api("/api/table/" + encodeURIComponent(currentColTable) + "/mapping", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
+  if (r.error) return setStatus($("columns_status"), r.error, false);
   setStatus($("columns_status"), "Saved", true);
+  loadPgTables(true);
+  loadMappingSummary();
+};
+
+$("col_new").onclick = async () => {
+  if (!currentColTable) return;
+  const r = await api("/api/table/" + encodeURIComponent(currentColTable) + "/mapping/new", { method: "POST" });
+  if (r.error) return setStatus($("columns_status"), r.error, false);
+  await loadColumns(r.key);
+  setStatus($("columns_status"), "New mapping: tick the columns it needs, name the Postgres table, then Save.");
+};
+
+$("col_delete").onclick = async () => {
+  if (!currentColTable) return;
+  const t = currentColTable;
+  const extra = t.includes(":");
+  const msg = extra
+    ? `Delete mapping ${t}?`
+    : `Delete the ${t} mapping (and any extra mappings on it) and remove it from the selected tables?`;
+  if (!confirm(msg + "\n\nOnly the mapping is removed from Data Flow - the Postgres table is not touched.")) return;
+  await fetch("/api/table/" + encodeURIComponent(t) + "/mapping", { method: "DELETE" });
+  if (extra) return loadColumns(t.split(":")[0]);
+  selection = selection.filter((x) => x !== t);
+  renderTables();
+  currentColTable = null;
+  $("col_table_title").textContent = "Pick a table on the left";
+  $("col_grid").querySelector("tbody").innerHTML = "";
+  $("col_pg_table").value = "";
+  ["col_pg_table", "col_fast_load", "col_upsert", "col_save", "col_new"].forEach((id) => { $(id).disabled = true; });
+  $("col_delete").hidden = true;
+  setStatus($("columns_status"), `Deleted ${t}`, true);
   loadMappingSummary();
 };
 
 // ---------- migrate / compare / sync ----------
+// ---------- table groups ----------
+let allGroups = [];
+let groupDraft = null;
+const groupCols = {};   // oracle table -> column names, fetched on demand
+
+const blankGroup = () => ({ target: "", mode: "join", sources: [], joins: [], parts: [] });
+
+async function loadGroups() {
+  const r = await api("/api/groups");
+  if (r.error) {
+    $("group_list").innerHTML =
+      `<p class="status err">${r.error}</p>` +
+      '<p class="status">If this is a 404, the server is still running the ' +
+      "older code — restart it to pick up the Groups API.</p>";
+    allGroups = [];
+    return;
+  }
+  allGroups = r.groups || [];
+  renderGroupList();
+  await loadPgTables(true);
+  if (groupDraft) openGroup(groupDraft);
+  if (!allTables.length) {
+    const t = await api("/api/oracle/tables");
+    if (!t.error) allTables = t.tables;
+    if (groupDraft) renderGroupEditor();
+  }
+}
+
+function renderGroupList() {
+  const list = $("group_list");
+  list.innerHTML = "";
+  if (!allGroups.length) {
+    list.innerHTML = '<p class="status">No groups yet. "New group" to combine two or more tables.</p>';
+    return;
+  }
+  allGroups.forEach((g) => {
+    const item = document.createElement("div");
+    item.className = "mapping-item" + (groupDraft && groupDraft.target === g.target ? " active" : "");
+    item.innerHTML =
+      `<div class="mapping-item-name">${g.target}</div>` +
+      `<div class="mapping-item-badges"><span class="badge">${g.mode}</span>` +
+      `<span class="badge muted">${g.sources.join(" + ")}</span></div>`;
+    item.onclick = () => openGroup(g);
+    list.appendChild(item);
+  });
+}
+
+function openGroup(g) {
+  if (!g) return;
+  groupDraft = JSON.parse(JSON.stringify(g));
+  $("group_editor").hidden = false;
+  $("group_title").textContent = g.target ? `Group: ${g.target}` : "New group";
+  $("group_target").value = groupDraft.target;
+  const note = document.createElement("p");
+  note.className = "status warn";
+  $("group_target_pick").replaceChildren(pgTablePicker($("group_target"), note));
+  $("group_mode").value = groupDraft.mode;
+  $("group_delete").hidden = !g.target;
+  setStatus($("group_status"), "");
+  $("group_errors").innerHTML = "";
+  const draft = groupDraft;
+  Promise.all(draft.sources.map(ensureColumns))
+    .then(() => { if (groupDraft === draft) renderGroupEditor(); });
+  renderGroupEditor();
+  renderGroupList();
+}
+
+$("group_new").onclick = () => openGroup(blankGroup());
+$("group_target").oninput = () => {
+  if (groupDraft) groupDraft.target = $("group_target").value;
+};
+$("group_filter").oninput = () => { if (groupDraft) renderGroupEditor(); };
+$("group_mode").onchange = () => {
+  groupDraft.mode = $("group_mode").value;
+  renderGroupEditor();
+};
+
+async function ensureColumns(table) {
+  if (groupCols[table]) return groupCols[table];
+  const r = await api(`/api/table/${encodeURIComponent(table)}/columns`);
+  if (r.error || !r.columns) return [];  // don't cache a failure - retry next render
+  groupCols[table] = r.columns.map((c) => c.name);
+  return groupCols[table];
+}
+
+// A source can only link to one joined before it, so the editor offers
+// exactly the tables earlier in the order — mirroring groups._validate_joins.
+const earlierSources = (src) => groupDraft.sources.slice(0, groupDraft.sources.indexOf(src));
+
+function linkFor(right) {
+  let j = groupDraft.joins.find((x) => x.right === right);
+  if (!j) {
+    const earlier = earlierSources(right);
+    j = { right, left: earlier[earlier.length - 1] || "", type: "inner", on: [{ left_col: "", right_col: "" }] };
+    groupDraft.joins.push(j);
+  }
+  return j;
+}
+
+function renderGroupEditor() {
+  const picker = $("group_sources");
+  picker.innerHTML = "";
+  const split = groupDraft.mode === "split";
+  const f = $("group_filter").value.trim().toUpperCase();
+  // nothing listed until a search is typed (schemas run to thousands of
+  // tables); checked tables stay visible regardless of the search
+  const pool = [...groupDraft.sources,
+    ...(f ? allTables.filter((t) => t.includes(f) && !groupDraft.sources.includes(t)) : [])];
+  $("group_sources_hint").textContent = !allTables.length
+    ? "Couldn't load Oracle tables — check the connection."
+    : split ? "Search and check the one table to split."
+    : "Search and check to add or remove. Order matters: the first table drives the join.";
+  $("group_target_label").textContent = split ? "Group name" : "Postgres table";
+  $("group_target_pick").hidden = split;  // a split's name isn't a table
+  pool.forEach((t) => {
+    const row = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = groupDraft.sources.includes(t);
+    cb.onchange = async () => {
+      if (cb.checked) {
+        if (split) groupDraft.sources = [];  // a split has exactly one source
+        groupDraft.sources.push(t);
+        await ensureColumns(t);
+      } else {
+        groupDraft.sources = groupDraft.sources.filter((x) => x !== t);
+        groupDraft.joins = groupDraft.joins.filter((j) => j.right !== t && j.left !== t);
+      }
+      renderGroupEditor();
+    };
+    row.append(cb, document.createTextNode(" " + t));
+    picker.appendChild(row);
+  });
+
+  const order = $("group_order");
+  order.innerHTML = "";
+  groupDraft.sources.forEach((t, i) => {
+    const chip = document.createElement("span");
+    chip.className = "group-chip";
+    chip.innerHTML = `<span class="pos">${i === 0 ? "drives" : i + 1}</span> ${t}`;
+    if (i > 0) {
+      const up = document.createElement("button");
+      up.className = "secondary";
+      up.textContent = "↑";
+      up.title = "move earlier";
+      up.onclick = () => {
+        const s = groupDraft.sources;
+        [s[i - 1], s[i]] = [s[i], s[i - 1]];
+        renderGroupEditor();
+      };
+      chip.appendChild(up);
+    }
+    order.appendChild(chip);
+  });
+
+  $("group_links_wrap").hidden = groupDraft.mode !== "join";
+  if (groupDraft.mode === "join") renderGroupLinks();
+  $("group_parts_wrap").hidden = !split;
+  if (split) renderGroupParts();
+}
+
+function renderGroupParts() {
+  groupDraft.parts = groupDraft.parts || [];
+  const wrap = $("group_parts");
+  wrap.innerHTML = "";
+  const cols = groupCols[groupDraft.sources[0]] || [];
+  groupDraft.parts.forEach((p, pi) => {
+    const box = document.createElement("div");
+    box.className = "group-link";
+    const head = document.createElement("div");
+    head.className = "row";
+    const name = document.createElement("input");
+    name.placeholder = "postgres_table";
+    name.value = p.pg_table;
+    name.autocomplete = "off";
+    name.oninput = () => { p.pg_table = name.value; };
+    const where = document.createElement("input");
+    where.placeholder = "row filter, e.g. STATUS = 'A'";
+    where.value = p.where || "";
+    where.oninput = () => { p.where = where.value; };
+    const rm = document.createElement("button");
+    rm.className = "secondary";
+    rm.textContent = "×";
+    rm.onclick = () => { groupDraft.parts.splice(pi, 1); renderGroupParts(); };
+    head.append(name, where, rm);
+    box.appendChild(head);
+    const note = document.createElement("p");
+    note.className = "status warn";
+    box.appendChild(pgTablePicker(name, note));
+
+    const list = document.createElement("div");
+    list.className = "tablelist";
+    list.style.cssText = "max-height: 140px; overflow-y: auto;";
+    if (!cols.length) list.innerHTML = '<p class="status">Pick the Oracle table first.</p>';
+    cols.forEach((c) => {
+      const lbl = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = p.columns.includes(c);
+      cb.onchange = () => {
+        p.columns = cb.checked ? [...p.columns, c] : p.columns.filter((x) => x !== c);
+      };
+      lbl.append(cb, document.createTextNode(" " + c));
+      list.appendChild(lbl);
+    });
+    box.appendChild(list);
+    wrap.appendChild(box);
+  });
+}
+
+$("group_add_part").onclick = () => {
+  groupDraft.parts = groupDraft.parts || [];
+  groupDraft.parts.push({ pg_table: "", columns: [], where: "" });
+  renderGroupParts();
+};
+
+function colSelect(table, value, onPick) {
+  const sel = document.createElement("select");
+  const fill = (cols) => {
+    sel.innerHTML = '<option value="">(column)</option>' +
+      cols.map((c) => `<option${c === value ? " selected" : ""}>${c}</option>`).join("");
+  };
+  fill(groupCols[table] || []);
+  if (!groupCols[table] && table) ensureColumns(table).then(fill);
+  sel.onchange = () => onPick(sel.value);
+  return sel;
+}
+
+function renderGroupLinks() {
+  const wrap = $("group_links");
+  wrap.innerHTML = "";
+  const joined = groupDraft.sources.slice(1);
+  if (!joined.length) {
+    wrap.innerHTML = '<p class="status">Add a second table to define a link.</p>';
+    return;
+  }
+  joined.forEach((right) => {
+    const j = linkFor(right);
+    const box = document.createElement("div");
+    box.className = "group-link";
+
+    const head = document.createElement("div");
+    head.className = "row";
+    head.append(document.createTextNode(right + " joins to "));
+    const leftSel = document.createElement("select");
+    const earlier = earlierSources(right);
+    leftSel.innerHTML = earlier
+      .map((t) => `<option${t === j.left ? " selected" : ""}>${t}</option>`).join("");
+    leftSel.onchange = () => { j.left = leftSel.value; renderGroupLinks(); };
+    head.appendChild(leftSel);
+    head.append(document.createTextNode(" as "));
+    const typeSel = document.createElement("select");
+    typeSel.innerHTML =
+      `<option value="inner"${j.type === "inner" ? " selected" : ""}>inner (only matched rows)</option>` +
+      `<option value="left"${j.type === "left" ? " selected" : ""}>left (keep unmatched, NULL-filled)</option>`;
+    typeSel.onchange = () => { j.type = typeSel.value; };
+    head.appendChild(typeSel);
+    box.appendChild(head);
+
+    j.on.forEach((pair, pi) => {
+      const line = document.createElement("div");
+      line.className = "group-pair";
+      line.appendChild(colSelect(j.left, pair.left_col, (v) => { pair.left_col = v; }));
+      line.append(document.createTextNode("="));
+      line.appendChild(colSelect(right, pair.right_col, (v) => { pair.right_col = v; }));
+      if (j.on.length > 1) {
+        const rm = document.createElement("button");
+        rm.className = "secondary";
+        rm.textContent = "×";
+        rm.onclick = () => { j.on.splice(pi, 1); renderGroupLinks(); };
+        line.appendChild(rm);
+      }
+      box.appendChild(line);
+    });
+
+    const add = document.createElement("button");
+    add.className = "secondary";
+    add.textContent = "+ column pair";
+    add.title = "for a composite key";
+    add.onclick = () => { j.on.push({ left_col: "", right_col: "" }); renderGroupLinks(); };
+    box.appendChild(add);
+    wrap.appendChild(box);
+  });
+}
+
+$("group_suggest").onclick = async () => {
+  if (groupDraft.sources.length < 2) return setStatus($("group_status"), "Add two tables first", false);
+  setStatus($("group_status"), "Looking for foreign keys…");
+  const r = await api("/api/oracle/foreign-keys?tables=" + encodeURIComponent(groupDraft.sources.join(",")));
+  if (r.error) return setStatus($("group_status"), r.error, false);
+  let filled = 0;
+  groupDraft.sources.slice(1).forEach((right) => {
+    const earlier = earlierSources(right);
+    // an FK either way round tells us how the two tables line up
+    const fk = (r.fks || []).find(
+      (f) => (f.table === right && earlier.includes(f.ref_table)) ||
+             (f.ref_table === right && earlier.includes(f.table))
+    );
+    if (!fk) return;
+    const j = linkFor(right);
+    const rightIsChild = fk.table === right;
+    j.left = rightIsChild ? fk.ref_table : fk.table;
+    j.on = fk.columns.map((c, i) => rightIsChild
+      ? { left_col: fk.ref_columns[i], right_col: c }
+      : { left_col: c, right_col: fk.ref_columns[i] });
+    filled++;
+  });
+  renderGroupLinks();
+  setStatus($("group_status"), filled ? `Filled ${filled} link(s) from FKs` : "No foreign keys found between these tables", !!filled);
+};
+
+$("group_save").onclick = async () => {
+  groupDraft.target = $("group_target").value;
+  groupDraft.mode = $("group_mode").value;
+  // only links for tables still in the group, in join order
+  groupDraft.joins = groupDraft.sources.slice(1)
+    .map((right) => groupDraft.joins.find((j) => j.right === right))
+    .filter(Boolean);
+  if (groupDraft.mode !== "join") groupDraft.joins = [];
+  if (groupDraft.mode !== "split") groupDraft.parts = [];
+  $("group_errors").innerHTML = "";
+  setStatus($("group_status"), "Saving…");
+  const r = await api("/api/groups", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(groupDraft),
+  });
+  if (r.errors) {
+    setStatus($("group_status"), "Not saved", false);
+    $("group_errors").innerHTML =
+      r.errors.map((e) => `<p class="status err">${e}</p>`).join("");
+    return;
+  }
+  if (!r.group) return setStatus($("group_status"), r.error || "Save failed", false);
+  setStatus($("group_status"), "Saved", true);
+  await loadGroups();
+  openGroup(r.group);
+};
+
+$("group_delete").onclick = async () => {
+  if (!groupDraft.target) return;
+  await fetch(`/api/groups/${encodeURIComponent(groupDraft.target)}`, { method: "DELETE" });
+  groupDraft = null;
+  $("group_editor").hidden = true;
+  $("group_title").textContent = "No group open";
+  await loadGroups();
+};
+
 function logLine(s) {
   const log = $("log");
   log.textContent += s + "\n";
@@ -308,7 +1109,11 @@ $("create_tables").onclick = async () => {
   });
   if (r.error) return setStatus($("migrate_status"), r.error, false);
   r.results.forEach((x) =>
-    logLine(`[create] ${x.table} → ${x.pg_table}: ${x.status}${x.error ? " — " + x.error : ""}`)
+    logLine(
+      `[create] ${x.table} → ${x.pg_table}: ${x.status}` +
+      (x.kind === "group" ? ` (${x.mode} of ${x.sources.join(", ")})` : "") +
+      (x.error ? " — " + x.error : "")
+    )
   );
   const errs = r.results.filter((x) => x.status === "error").length;
   setStatus($("migrate_status"), errs ? `${errs} errors (see log)` : "Tables ready", !errs);
@@ -353,9 +1158,13 @@ async function recreateAndSync(table) {
   r.results.forEach((x) =>
     logLine(`[recreate] ${x.table} → ${x.pg_table}: ${x.status}${x.error ? " — " + x.error : ""}`)
   );
-  driftTables.delete(table);
+  // A merged target is rebuilt from every source at once, so the backend may
+  // have recreated siblings we didn't ask for — re-sync all of them, or the
+  // shared table keeps only this one source's rows.
+  const group = [...new Set(r.results.map((x) => x.table))];
+  group.forEach((t) => driftTables.delete(t));
   renderDriftPanel();
-  runSync([table]);
+  runSync(group.length ? group : [table]);
 }
 
 function fmt(n) { return n === null || n === undefined ? "—" : n.toLocaleString(); }
@@ -438,7 +1247,12 @@ function runSync(tables, freshTables) {
     }
     else if (m.type === "table_done") {
       const skipped = m.rows_skipped ? `, ${fmt(m.rows_skipped)} skipped (see History for detail)` : "";
-      logLine(`✓ ${m.table}: ${fmt(m.rows_loaded)} rows loaded${skipped}  (oracle ${fmt(m.oracle)} / pg ${fmt(m.pg)}) ${m.match ? "MATCH" : "MISMATCH"}`);
+      const c = m.changes;
+      const changes = c ? ` — ${fmt(c.inserted)} new, ${fmt(c.updated)} updated, ${fmt(c.unchanged)} unchanged` : "";
+      logLine(`✓ ${m.table}: ${fmt(m.rows_loaded)} rows loaded${changes}${skipped}  (oracle ${fmt(m.oracle)} / pg ${fmt(m.pg)}) ${m.match ? "MATCH" : "MISMATCH"}`);
+      (m.dictionary_misses || []).forEach((x) => logLine(
+        `⚠ ${m.table}.${x.column}: ${fmt(x.values.length)}${x.capped ? "+" : ""} value(s) not in dictionary ${x.dictionary} — those rows were skipped. ` +
+        `Add them on the Mappings tab and sync again:\n    ${x.values.join(", ")}`));
       checkpointTables.delete(m.table);
       renderCheckpointPanel();
     }
@@ -525,6 +1339,7 @@ function renderDryRun(rows) {
     meta.innerHTML =
       `<span>Oracle rows: ${fmt(r.oracle_rows)}</span>` +
       `<span>PG rows: ${r.exists ? fmt(r.pg_rows) : "table not created yet"}</span>` +
+      (r.kind === "group" ? `<span>${r.mode} of ${r.sources.join(", ")}</span>` : "") +
       (r.drift ? `<span class="mismatch">mapping drift — recreate would change DDL</span>` : "") +
       (r.resumable_from != null ? `<span>resumable from row ${fmt(r.resumable_from)}</span>` : "");
     const heading = document.createElement("h4");
@@ -532,6 +1347,18 @@ function renderDryRun(rows) {
     const pre = document.createElement("pre");
     pre.textContent = r.create_ddl;
     card.append(heading, meta, pre);
+    if (r.join_sql) {
+      const q = document.createElement("pre");
+      q.textContent = `${r.join_sql}\nORDER BY ${r.order_by}`;
+      card.appendChild(q);
+    }
+    if (r.renamed && r.renamed.length) {
+      const note = document.createElement("div");
+      note.className = "status warn";
+      note.textContent = "Renamed to avoid collisions: " +
+        r.renamed.map((x) => `${x.source}.${x.was} → ${x.now}`).join(", ");
+      card.appendChild(note);
+    }
     if (r.fast_load_drop) {
       const dropNote = document.createElement("div");
       const counts = Object.entries(r.fast_load_drop)
@@ -620,3 +1447,24 @@ async function toggleRunErrors(runId, afterRow) {
 $("history_refresh").onclick = loadHistory;
 
 loadConfig();
+
+// floating jump-to-top / jump-to-bottom buttons
+$("scroll_top").onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
+$("scroll_bottom").onclick = () => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
+
+// ---------- import (the counterpart of "Export all data") ----------
+$("import_btn").onclick = () => $("import_file").click();
+$("import_file").onchange = async () => {
+  const file = $("import_file").files[0];
+  $("import_file").value = "";
+  if (!file) return;
+  if (!confirm(`Replace ALL connections, mappings, groups and history here with the contents of ${file.name}?\n\n` +
+               "A backup of the current data is kept next to the database file.")) return;
+  // started from the History tab or the first-run prompt on Connections
+  const status = $("connections").classList.contains("active") ? $("first_run_status") : $("history_status");
+  setStatus(status, "Importing…");
+  const r = await api("/api/import", { method: "POST", body: file });
+  if (r.error) return setStatus(status, r.error, false);
+  alert(`Imported. The previous data was saved as ${r.backup}.\nThe page will reload.`);
+  location.reload();
+};
