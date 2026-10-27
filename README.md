@@ -12,7 +12,14 @@ Postgres. **No ora2pg / Perl / Oracle Instant Client required**
 (`python-oracledb` runs in thin mode; `psycopg` v3 does the bulk load via
 `COPY`).
 
-## Install & run
+## Download (Windows)
+Get `data-flow-<version>-windows.zip` from
+[Releases](https://github.com/the-clrsky/data-flow/releases): it brings its own
+Python, so nothing else needs installing. Unzip it, double-click
+`Data Flow.bat` and open `http://localhost:8000`. `READ-ME-FIRST.txt` inside
+explains the rest.
+
+## Install & run from source
 From the project root:
 
 **Linux / Ubuntu server**
@@ -62,7 +69,10 @@ with a name you already have is overwritten, or comes in as "Name (2)"), or it
 replaces everything. Files exported before sets come in as one set,
 "Default". The Dictionaries tab can copy dictionaries from another set.
 
-1. **Connections** — enter + test Oracle and Postgres connections.
+1. **Connections** — name the active set (and pick its colour), enter + test
+   its Oracle and Postgres connections. **Export this set**, **Export sets…**,
+   **Export all** and **Import…** sit on the right of the set card (and in the
+   set menu).
 2. **Tables** — list Oracle tables, filter, pick which to migrate, save the
    selection. A "Show row counts (approx.)" button pulls a fast, single-query
    row-count estimate per table from Oracle's optimizer statistics — safe to
@@ -82,6 +92,10 @@ replaces everything. Files exported before sets come in as one set,
      and name collisions between sources (two tables both having `NAME`)
      are suffixed with the source table — a rename on the Mappings tab
      overrides that.
+   - **Split** — the other way round: **one Oracle table into several**
+     Postgres tables. Each gets the columns ticked for it (none ticked = all)
+     and an optional Oracle `WHERE` row filter; the primary key is copied
+     into every one of them.
    - **Union** — the tables are shaped alike and their rows are stacked.
      The target gets the union of their mapped columns plus a
      `_source_table` column recording each row's origin, which is what lets
@@ -90,7 +104,7 @@ replaces everything. Files exported before sets come in as one set,
      column as different Postgres types the group is refused, naming the
      conflict rather than silently picking one.
 
-   A group's target gets **no primary key** (a join can repeat a source's
+   A join or union group's target gets **no primary key** (a join can repeat a source's
    key, and a union's sources can collide with each other) — add one by hand
    if the combined data really is unique. A table belongs to at most one
    group, and a grouped table is never created or synced on its own. The
@@ -105,10 +119,17 @@ replaces everything. Files exported before sets come in as one set,
    dictionary and lookup is shown as a card with the mapping columns that use
    it (highlighted). Search by name, Oracle or Postgres column, or table.
    **View** opens a dictionary's entries, where single entries can be added.
+   **Import from another set…** copies picked dictionaries from another set
+   (a dictionary of the same name here is replaced, after asking).
 
 5. **Mappings** — per-table column mapping: rename columns, rename the target
    table, skip columns, override the Postgres type, and flag a table for
    "fast load" (drop constraints/indexes/FKs before sync, recreate after).
+   A column can also feed more than one Postgres column, go through a
+   dictionary or lookup, or get a value when it's null; a Postgres-only column
+   of an existing target can be filled with a fixed value or a dictionary /
+   lookup of an Oracle column (**Add to Sync**). The dictionaries the open
+   table uses are listed beside the grid; **Hide** folds that column away.
    Detects **schema drift** — if the mapping changes after a table was
    created, it's flagged before the next sync so you can recreate deliberately
    rather than get a silent surprise.
@@ -138,16 +159,19 @@ replaces everything. Files exported before sets come in as one set,
      exponential 1s/2s/4s) for both Oracle and Postgres calls.
    - **Live progress over SSE**: rows loaded, rows/sec throughput, and an ETA,
      in addition to retry/constraint-drop/restore events.
-7. **History** — every sync run (table, start/end time, duration, rows
-   loaded/skipped, status) is logged to SQLite and browsable here, so you can
+7. **History** — every sync run of the active set (table, start/end time,
+   duration, rows loaded/skipped, status) is logged to SQLite and browsable
+   here, so you can
    spot which tables are slow or fail often. Row-level error detail is
    viewable inline and the full run log (summary + row errors) can be
    downloaded as a text file for sharing outside the app.
 
 A minimal footer with attribution appears on every page.
 
-State (connections, column mappings, checkpoints, sync history) lives in
-`data-flow.db` (SQLite, gitignored).
+State (sets with their connections, column mappings, checkpoints and sync
+history) lives in `data-flow.db` (SQLite, gitignored). Each import first saves
+the old state as `data-flow.db.bak-<date>` next to it (also gitignored); delete
+those once you no longer need them, as they hold passwords too.
 
 ## Project layout
 ```
@@ -159,7 +183,7 @@ data-flow/
 ├─ tests/                   # pure checks: run with `python tests/test_*.py`
 └─ src/dataflow/
    ├─ cli.py               # console command -> launches uvicorn
-   ├─ main.py              # FastAPI routes (config, test, tables, mapping, migrate, sync/SSE, history)
+   ├─ main.py              # FastAPI routes (sets, config, test, tables, mapping, migrate, sync/SSE, history, export/import)
    ├─ engine.py            # orchestration: create/recreate, compare, dry run, chunked sync stream
    ├─ oracle_client.py     # Oracle connect + metadata + chunked/ordered reads (thin mode)
    ├─ pg_client.py         # Postgres connect + DDL + COPY/row-insert load + constraint introspection (psycopg3)
@@ -178,6 +202,7 @@ data-flow/
 ## Notes / limits
 - Single-user, no auth — **bind to localhost or a trusted LAN only.** Connection
   passwords are stored in plaintext in the SQLite state file; don't expose publicly.
+  An export leaves passwords out unless **Include passwords** is ticked.
 - `types_map.py` covers common Oracle types; extend it for exotic ones.
 - Row-count estimates on the Tables tab come from Oracle's optimizer
   statistics, not a live count — they can be stale on tables with heavy recent
