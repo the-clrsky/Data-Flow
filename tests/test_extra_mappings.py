@@ -47,6 +47,18 @@ def test_extra_mapping_round_trip():
     assert mapping.extras(T) == []
 
 
+def test_preflight_checks_the_oracle_table_of_an_extra():
+    from unittest import mock
+    from dataflow import preflight
+    store.put("mappings", {})
+    asked = []
+    with mock.patch.object(preflight, "ora") as ora, mock.patch.object(preflight, "pg") as pg:
+        ora.check_read_access.side_effect = lambda con, owner, t: asked.append(t)
+        pg.check_privileges.return_value = (True, None)
+        assert preflight.run({}, {"target_schema": "public"}, [T, f"{T}:2"]) == []
+    assert asked == [T]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

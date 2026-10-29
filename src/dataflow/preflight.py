@@ -34,7 +34,7 @@ def run(ocfg, pcfg, table_names):
     try:
         if ocon is not None:
             owner = ora.owner(ocfg)
-            for t in table_names:
+            for t in {mapping.oracle_table(k) for k in table_names}:
                 try:
                     ora.check_read_access(ocon, owner, t)
                 except Exception as e:  # noqa: BLE001
