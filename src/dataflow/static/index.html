@@ -198,9 +198,7 @@
         <div class="card" id="dict_forms_home">
           <div id="dict_forms">
           <h3>Add or update a dictionary</h3>
-          <p class="status">Old &rarr; new value tables (e.g. user IDs). Pick one per column on the Mappings tab; every non-null value is swapped through it.
-            A row whose value isn't in the dictionary is skipped and logged.
-            Excel or CSV with header <code>oracle,postgres</code> &middot;
+          <p class="status">Excel or CSV: <code>oracle,postgres</code> &middot;
             <a class="link" href="data:text/csv;charset=utf-8,oracle%2Cpostgres%0D%0A" download="dictionary_template.csv">template</a></p>
           <label>Name <input id="dict_name" placeholder="e.g. USER_ID - or click a dictionary to update it" autocomplete="off" /></label>
           <label>File <input id="dict_file" type="file" accept=".xlsx,.xlsm,.csv,.txt" /></label>
@@ -218,9 +216,6 @@
           </div>
 
           <h3>Add or edit a Postgres lookup</h3>
-          <p class="status">Take the value from a table already in Postgres, e.g. the <code>id</code> of the customer whose <code>code</code> is the Oracle value.
-            Pick it in a column's Dictionary list on the Mappings tab, like a dictionary. Matching on several columns (<code>code, branch</code>)? Name the other Oracle columns on that row, in the same order.
-            The table loads first when it's in the same sync. A row with no match is skipped and logged.</p>
           <label>Name <input id="lk_name" placeholder="e.g. CUSTOMER_ID - or click a lookup to edit it" autocomplete="off" /></label>
           <label>Postgres table <input id="lk_table" placeholder="customers" autocomplete="off" /></label>
           <label>Match on column(s) <input id="lk_match" placeholder="code, branch" autocomplete="off" /></label>
@@ -239,6 +234,7 @@
       <div class="cols">
         <div class="card">
           <h2>Selected tables</h2>
+          <p class="status">Synced top to bottom.</p>
           <div class="row">
             <button id="mapping_refresh" class="secondary">Refresh status</button>
           </div>
@@ -323,6 +319,7 @@
     <section id="history" class="panel">
       <div class="row">
         <button id="history_refresh" class="secondary">Refresh</button>
+        <button id="history_clear" class="danger">Clear history</button>
         <span id="history_status" class="status"></span>
       </div>
       <table id="history_table" class="grid">

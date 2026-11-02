@@ -130,7 +130,10 @@ every tab switches to it.
    or a dictionary/lookup of an Oracle column (**Add to Sync**). **Fast load**
    drops constraints, indexes and FKs before the sync and recreates them after.
    **Schema drift** (a mapping changed after its table was created) is flagged
-   before the next sync, so recreating is a deliberate choice.
+   before the next sync, so recreating is a deliberate choice. The selected
+   tables list is the **sync order**: move a mapping up or down with ▲ ▼ so a
+   table loads before the tables that need its rows (a Postgres FK parent
+   still goes first).
 6. **Migrate & Sync**
    - Create (or recreate) the selected tables in Postgres and compare row
      counts side by side.
@@ -151,6 +154,7 @@ every tab switches to it.
    - **Live progress** over server-sent events: rows loaded, rows/sec, ETA.
 7. **History**: every sync run of the set (table, times, duration, rows
    loaded/skipped, status), with each run's row errors to view or download.
+   Delete a run, or **Clear history** for the whole set.
 
 ## Security
 

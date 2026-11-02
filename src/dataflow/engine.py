@@ -1021,15 +1021,20 @@ def _sync_units(ocon, pcon, schema, owner, table_names, on_retry=None):
     thing it is loading. Returns (units, errors).
     """
     units, errors = [], []
+    # units keep the order of `table_names` (set on the Columns tab), a group
+    # at its first source's place; the FK sort in sync_stream only overrides it
+    pos = {t: i for i, t in enumerate(table_names)}
     grouped = groups.grouped_sources()
     for t in mapping.expand(table_names):
         if mapping.oracle_table(t) in grouped:
             continue
         try:
             units.append(_table_unit(ocon, pcon, schema, owner, t, on_retry=on_retry))
+            units[-1]["rank"] = pos.get(t, pos.get(mapping.oracle_table(t), len(pos)))
         except Exception as e:  # noqa: BLE001
             errors.append(dict(label=t, error=str(e)))
     for g in groups.active(table_names):
+        start = len(units)
         try:
             if g["mode"] == "split":
                 units.extend(_split_units(ocon, pcon, schema, owner, g, on_retry=on_retry))
@@ -1046,6 +1051,10 @@ def _sync_units(ocon, pcon, schema, owner, table_names, on_retry=None):
                                         plan, on_retry=on_retry))
         except Exception as e:  # noqa: BLE001
             errors.append(dict(label=g["target"], error=str(e)))
+        finally:  # also after the split branch's `continue`
+            for u in units[start:]:
+                u["rank"] = min(pos.get(s, len(pos)) for s in g["sources"])
+    units.sort(key=lambda u: u["rank"])
     return units, errors
 
 

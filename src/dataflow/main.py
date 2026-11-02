@@ -314,11 +314,13 @@ def delete_table_mapping(table: str):
     """Forget a mapping. Never touches Postgres. Deleting a table's main
     mapping also drops its extra mappings and takes the table out of the
     selection, since a selected table always maps somewhere."""
+    gone = {table}
     if not mapping.is_extra(table):
-        for k in mapping.extras(table):
-            mapping.delete(k)
-        store.put("selection", [t for t in store.get("selection", []) if t != table])
-    mapping.delete(table)
+        gone.update(mapping.extras(table))
+    for k in gone:
+        mapping.delete(k)
+    # the selection can name extras too, for their place in the sync order
+    store.put("selection", [t for t in store.get("selection", []) if t not in gone])
     return {"ok": True}
 
 
@@ -503,6 +505,12 @@ def dry_run(tables: str = ""):
 @app.get("/api/sync-runs")
 def sync_runs(limit: int = 200):
     return {"runs": history.list_runs(limit)}
+
+
+@app.delete("/api/sync-runs")
+def delete_sync_runs(run_id: int | None = None):
+    """All of the active set's history, or one run of it."""
+    return _busy() or {"deleted": history.delete_runs(run_id)}
 
 
 @app.get("/api/sync-runs/{run_id}/errors")

@@ -57,10 +57,12 @@ def next_extra(table):
 
 
 def expand(table_names):
-    """Each table followed by its extra mappings, deduplicated."""
+    """Each table followed by its extra mappings, deduplicated. An extra
+    named in `table_names` itself (moved in the sync order) keeps that place."""
+    named = set(table_names)
     out = []
     for t in table_names:
-        for k in [t] + extras(t):
+        for k in [t] + [e for e in extras(t) if e not in named]:
             if k not in out:
                 out.append(k)
     return out

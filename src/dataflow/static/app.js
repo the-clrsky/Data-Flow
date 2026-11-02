@@ -110,7 +110,7 @@ function renderTables() {
     cb.checked = selection.includes(t);
     cb.onchange = () => {
       if (cb.checked) selection.push(t);
-      else selection = selection.filter((x) => x !== t);
+      else selection = selection.filter((x) => x.split(":")[0] !== t);  // and its extras
     };
     lbl.appendChild(cb);
     const info = document.createElement("span");
@@ -274,7 +274,7 @@ function renderTableDicts() {
   $("col_dict_list").replaceChildren(...items);
   $("col_dicts_note").textContent = !t ? "Pick a table to see the dictionaries it uses."
     : items.length ? `Used by ${t}'s saved mapping:`
-    : `${t}'s saved mapping uses no dictionary yet. Pick one in a column's Dictionary list, or add one below.`;
+    : "None used yet.";
   capList($("col_dict_list"));
   colDictsToggleLabel(items.length);
 }
@@ -482,15 +482,45 @@ async function loadMappingSummary() {
     list.innerHTML = '<p class="status">No tables selected yet. Pick tables on the Tables tab and save your selection.</p>';
     return;
   }
+  summaryRows = r.rows;
+  renderMappingSummary();
+}
+
+let summaryRows = [];
+// Top to bottom is the sync order (a parent table Postgres has an FK to still
+// goes first). The rows come back in that order: the selection, each table
+// followed by its extra mappings ("T:2") unless one was moved on its own.
+function renderMappingSummary() {
+  const list = $("mapping_summary");
   list.innerHTML = "";
-  r.rows.forEach((row) => {
+  summaryRows.forEach((row, i) => {
     const item = document.createElement("div");
     item.className = "mapping-item" + (row.table === currentColTable ? " active" : "");
     item.innerHTML =
       `<div class="mapping-item-name">${row.table} &rarr; ${row.pg_table}</div>` +
       `<div class="mapping-item-badges">${mappingBadges(row).join(" ")}</div>`;
     item.onclick = () => loadColumns(row.table);
+    const move = document.createElement("span");
+    move.className = "mapping-item-move";
+    [["▲", -1, "Sync earlier"], ["▼", 1, "Sync later"]].forEach(([text, step, title]) => {
+      const b = Object.assign(document.createElement("button"), { type: "button", className: "secondary btn-sm", textContent: text, title });
+      b.disabled = !summaryRows[i + step];
+      b.onclick = (e) => { e.stopPropagation(); moveSelected(i, i + step); };
+      move.appendChild(b);
+    });
+    item.prepend(move);
     list.appendChild(item);
+  });
+}
+
+// saves every row's key, extras included, so each keeps the place it was given
+async function moveSelected(i, j) {
+  [summaryRows[i], summaryRows[j]] = [summaryRows[j], summaryRows[i]];
+  selection = summaryRows.map((r) => r.table);
+  renderMappingSummary();
+  await api("/api/selection", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tables: selection }),
   });
 }
 
@@ -944,8 +974,8 @@ $("col_delete").onclick = async () => {
     : `Delete the ${t} mapping (and any extra mappings on it) and remove it from the selected tables?`;
   if (!confirm(msg + "\n\nOnly the mapping is removed from Data Flow - the Postgres table is not touched.")) return;
   await fetch("/api/table/" + encodeURIComponent(t) + "/mapping", { method: "DELETE" });
+  selection = selection.filter((x) => x !== t && (extra || x.split(":")[0] !== t));
   if (extra) return loadColumns(t.split(":")[0]);
-  selection = selection.filter((x) => x !== t);
   renderTables();
   currentColTable = null;
   $("col_table_title").textContent = "Pick a table on the left";
@@ -1629,6 +1659,10 @@ async function loadHistory() {
     dl.className = "btn btn-sm";
     dl.style.marginLeft = "10px";
     actions.appendChild(dl);
+    const del = Object.assign(document.createElement("button"), { className: "danger btn-sm", textContent: "Delete" });
+    del.style.marginLeft = "10px";
+    del.onclick = () => deleteHistory(run.id);
+    actions.appendChild(del);
     tb.appendChild(tr);
   });
   setStatus($("history_status"), `${(r.runs || []).length} runs`, true);
@@ -1656,6 +1690,16 @@ async function toggleRunErrors(runId, afterRow) {
 }
 
 $("history_refresh").onclick = loadHistory;
+$("history_clear").onclick = () => deleteHistory();
+
+// one run, or with no id the whole history of this set
+async function deleteHistory(runId) {
+  if (!confirm(runId ? "Delete this run and its row errors from the history?"
+                     : "Delete the whole sync history of this set, with its row errors?")) return;
+  const r = await api("/api/sync-runs" + (runId ? `?run_id=${runId}` : ""), { method: "DELETE" });
+  if (r.error) return setStatus($("history_status"), r.error, false);
+  loadHistory();
+}
 
 // floating jump-to-top / jump-to-bottom buttons
 $("scroll_top").onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });

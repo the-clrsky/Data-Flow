@@ -94,6 +94,17 @@ def finish_run(run_id, rows_loaded, rows_skipped, status):
         )
 
 
+def delete_runs(run_id=None):
+    """Forget the active set's runs (or just `run_id`) and their row errors.
+    Checkpoints stay: they are resume state, not history."""
+    where, args = "set_id=?", [store.active()]
+    if run_id is not None:
+        where, args = where + " AND id=?", args + [run_id]
+    with _conn() as c:
+        c.execute(f"DELETE FROM row_errors WHERE run_id IN (SELECT id FROM sync_runs WHERE {where})", args)
+        return c.execute(f"DELETE FROM sync_runs WHERE {where}", args).rowcount
+
+
 def _run_row(r):
     return dict(
         id=r[0], table=r[1], pg_table=r[2], started_at=r[3], ended_at=r[4],
