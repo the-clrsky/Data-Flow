@@ -286,6 +286,10 @@ dialog .tablelist { max-height: 40vh; overflow-y: auto; margin-bottom: 12px; }
 #columns.dicts-collapsed #col_dicts_toggle { writing-mode: vertical-rl; padding: 10px 4px; }
 .grid-scroll { overflow-x: auto; }
 .dict-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; align-items: start; }
+/* a dictionary card's buttons share one line, growing and shrinking with the card */
+.dict-card-btns { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+.dict-card-btns > button, .dict-card-btns > a.btn { flex: 1 1 auto; padding: 7px 6px; text-align: center; white-space: nowrap; }
+.dict-card .mapping-item-name { overflow-wrap: anywhere; }  /* long names wrap, never cut */
 .mapping-item.used { border-color: var(--ok); box-shadow: inset 3px 0 0 var(--ok); }
 .used-by { flex-basis: 100%; color: var(--ok); font-size: 12px; white-space: pre-line; }
 .used-by.unused { color: var(--muted); }

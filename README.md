@@ -121,7 +121,8 @@ every tab switches to it.
    (header `oracle,postgres`) or typed in. **Postgres lookups** take the value
    from a table already in Postgres, e.g. the `id` of the row whose `code` is
    the Oracle value, matching on one or more columns. Each card shows which
-   mapping columns use it. **View** opens a dictionary's entries, and
+   mapping columns use it. **View** opens a dictionary's entries, **Update**
+   merges in the same file again with rows added or changed, and
    **Import from another set…** copies dictionaries from another set.
 5. **Mappings**: per table, rename the target table and its columns, skip
    columns, override Postgres types, send a column to several targets, run it

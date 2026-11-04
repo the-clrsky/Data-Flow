@@ -192,7 +192,7 @@ const usersOf = (name, table) => (dictData.used_by[name] || []).filter((u) => !t
 // when given), View / Download / Delete. A click picks it for the upload form.
 function dictItem(d, table) {
   const item = document.createElement("div");
-  item.className = "mapping-item row";
+  item.className = "mapping-item row dict-card";
   item.style.margin = "0";
   const del = Object.assign(document.createElement("button"), { className: "danger", textContent: "Delete" });
   del.onclick = async () => {
@@ -207,9 +207,24 @@ function dictItem(d, table) {
   });
   const view = Object.assign(document.createElement("button"), { className: "secondary", textContent: "View" });
   view.onclick = () => openDictView(d.name);
+  // the same Excel/CSV with rows added or changed: merged in, nothing removed
+  const update = Object.assign(document.createElement("button"), {
+    className: "secondary", textContent: "Update", title: "Upload the file again with new rows: adds new, updates changed",
+  });
+  update.onclick = () => {
+    const pick = Object.assign(document.createElement("input"), { type: "file", accept: ".xlsx,.xlsm,.csv,.txt" });
+    pick.onchange = () => {
+      if (!pick.files[0]) return;
+      $("dict_name").value = d.name;
+      sendDictRows(pick.files[0], pick.files[0].name, false);
+    };
+    pick.click();
+  };
   item.append(Object.assign(document.createElement("span"), {
     className: "mapping-item-name", textContent: `${d.name} (${d.entries} entries)`, style: "flex: 1 1 100%",
-  }), usedBy(item, usersOf(d.name, table)), view, csv, del);
+  }), usedBy(item, usersOf(d.name, table)),
+  Object.assign(document.createElement("div"), { className: "dict-card-btns" }));
+  item.lastChild.append(view, update, csv, del);
   item.onclick = (e) => { if (e.target === item || e.target.tagName === "SPAN") $("dict_name").value = d.name; };
   return item;
 }
