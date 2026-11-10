@@ -1761,6 +1761,14 @@ function reloadHere() {
   location.reload();
 }
 
+// The active set lives on the server, so a tab left open goes stale when another
+// one switches: it would show the old set's tables and save into the new one.
+// ponytail: checked on focus only; a server-side set check per request if several people share one server
+addEventListener("focus", async () => {
+  const r = await api("/api/sets");
+  if (activeSet && r.active && r.active !== activeSet.id) reloadHere();
+});
+
 async function switchSet(id) {
   if (id === activeSet.id) return;
   const r = await api(`/api/sets/${id}/activate`, { method: "POST" });
